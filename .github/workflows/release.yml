@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. v1.0.0)'
+        required: true
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Create and push tag
+        run: |
+          git tag ${{ inputs.version }}
+          git push origin ${{ inputs.version }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        run: python -m PyInstaller "GFA Tokenizer.spec" --noconfirm
+
+      - name: Package release zip
+        shell: pwsh
+        run: |
+          $zipName = "GFA-Tokenizer-${{ inputs.version }}-windows-x64.zip"
+          Compress-Archive -Path "dist\GFA Tokenizer.exe", README.md -DestinationPath $zipName -Force
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2.3.2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: "GFA Tokenizer ${{ inputs.version }}"
+          body: |
+            Pre-built Windows binary for GFA Tokenizer. Source code is available separately in the repository.
+
+            ### Installation
+            1. Download `GFA-Tokenizer-${{ inputs.version }}-windows-x64.zip`
+            2. Extract and run `GFA Tokenizer.exe` — no installation required.
+
+            ### Requirements
+            - Windows 10/11 x64
+
+            ### Usage
+            - **GUI:** Double-click `GFA Tokenizer.exe`, browse to your .lst file, click Convert
+            - **CLI:** `"GFA Tokenizer.exe" source.lst [-o out.gfa]`
+          files: ${{ env.ZIP_NAME }}
