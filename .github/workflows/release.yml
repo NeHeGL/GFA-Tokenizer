@@ -46,11 +46,13 @@ jobs:
 
       - name: Build release notes
         shell: pwsh
+        env:
+          WHATS_NEW: ${{ inputs.whats_new }}
         run: |
           $notes = @()
-          if ("${{ inputs.whats_new }}".Trim() -ne "") {
+          if ($env:WHATS_NEW.Trim() -ne "") {
             $notes += "### What's New in ${{ inputs.version }}"
-            $notes += "${{ inputs.whats_new }}"
+            $notes += $env:WHATS_NEW
             $notes += ""
             $notes += "---"
             $notes += ""
