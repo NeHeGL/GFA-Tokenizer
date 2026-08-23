@@ -6,6 +6,10 @@ on:
       version:
         description: 'Version to release (e.g. v1.0.0)'
         required: true
+      whats_new:
+        description: "What's new in this version (Markdown, e.g. bullet points). Shown at the top of the release notes."
+        required: false
+        default: ''
 
 jobs:
   build-and-release:
@@ -40,22 +44,35 @@ jobs:
           Compress-Archive -Path "dist\GFA Tokenizer.exe", README.md -DestinationPath $zipName -Force
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
+      - name: Build release notes
+        shell: pwsh
+        run: |
+          $notes = @()
+          if ("${{ inputs.whats_new }}".Trim() -ne "") {
+            $notes += "### What's New in ${{ inputs.version }}"
+            $notes += "${{ inputs.whats_new }}"
+            $notes += ""
+            $notes += "---"
+            $notes += ""
+          }
+          $notes += "Pre-built Windows binary for GFA Tokenizer. Source code is available separately in the repository."
+          $notes += ""
+          $notes += "### Installation"
+          $notes += "1. Download ``GFA-Tokenizer-${{ inputs.version }}-windows-x64.zip``"
+          $notes += "2. Extract and run ``GFA Tokenizer.exe`` — no installation required."
+          $notes += ""
+          $notes += "### Requirements"
+          $notes += "- Windows 10/11 x64"
+          $notes += ""
+          $notes += "### Usage"
+          $notes += "- **GUI:** Double-click ``GFA Tokenizer.exe``, browse to your .lst file, click Convert"
+          $notes += "- **CLI:** ``""GFA Tokenizer.exe"" source.lst [-o out.gfa]``"
+          $notes -join "`n" | Out-File -FilePath RELEASE_NOTES.md -Encoding utf8
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2.3.2
         with:
           tag_name: ${{ inputs.version }}
           name: "GFA Tokenizer ${{ inputs.version }}"
-          body: |
-            Pre-built Windows binary for GFA Tokenizer. Source code is available separately in the repository.
-
-            ### Installation
-            1. Download `GFA-Tokenizer-${{ inputs.version }}-windows-x64.zip`
-            2. Extract and run `GFA Tokenizer.exe` — no installation required.
-
-            ### Requirements
-            - Windows 10/11 x64
-
-            ### Usage
-            - **GUI:** Double-click `GFA Tokenizer.exe`, browse to your .lst file, click Convert
-            - **CLI:** `"GFA Tokenizer.exe" source.lst [-o out.gfa]`
+          body_path: RELEASE_NOTES.md
           files: ${{ env.ZIP_NAME }}
