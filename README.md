@@ -1,6 +1,8 @@
 # GFA Tokenizer for PC
 
-Converts readable GFA-BASIC `.lst` source listings into the tokenized `.gfa` binary format the Atari ST GFA-BASIC editor loads and saves — the reverse of the companion [GFA Detokenizer](https://github.com/) project. Produced files can be loaded into the real GFA-BASIC editor and compiled with the real compiler.
+**Direction: `.lst` -> `.gfa`** (readable source in, tokenized binary out). For the reverse direction (`.gfa` -> `.lst`), see the companion [GFA Detokenizer](https://github.com/) project.
+
+Converts readable GFA-BASIC `.lst` source listings into the tokenized `.gfa` binary format the Atari ST GFA-BASIC editor loads and saves — the reverse of the companion GFA Detokenizer project. Produced files can be loaded into the real GFA-BASIC editor and compiled with the real compiler.
 
 ## Requirements
 
