@@ -112,7 +112,15 @@ def push16(buf: bytearray, val: int) -> None:
 
 
 def push32(buf: bytearray, val: int) -> None:
-    buf += struct.pack(">i", val)
+    # Masked to the raw 32-bit pattern rather than packed signed: GFA's
+    # own compiler has the same behavior for hex/octal/binary literals
+    # whose value needs the top bit (e.g. &HFFFFFFFF) -- it stores the
+    # bit pattern, and its OWN detokenizer reads it back as a signed int,
+    # rendering "&H-1" instead of "&HFFFFFFFF" (confirmed directly
+    # against ground truth: default5.gfa's own bytes for exactly this
+    # case). Masking here just avoids a struct.error for the same values
+    # the real compiler already round-trips this same lossy way.
+    buf += struct.pack(">I", val & 0xFFFFFFFF)
 
 
 # ---------------------------------------------------------------------------
@@ -219,25 +227,27 @@ _NUM_RE = re.compile(
 )
 
 
-def parse_number(text: str, pos: int) -> tuple[float | int, bool, int] | None:
-    """Returns (value, is_float, new_pos) for a numeric literal at pos, or
-    None. is_float is True for anything with a decimal point/exponent --
-    everything else (including &H/&O/&X forms) is encoded as a plain
-    32-bit integer.
+def parse_number(text: str, pos: int) -> tuple[float | int, bool, int, int] | None:
+    """Returns (value, is_float, new_pos, base) for a numeric literal at
+    pos, or None. is_float is True for anything with a decimal point/
+    exponent (always base 10). base is 10/16/8/2 for a plain/&H/&O/&X
+    integer literal -- callers use it to pick the matching pft code
+    (200=decimal, 202=hex, 204=octal, 206=binary) so e.g. '&H1F2F3F4F'
+    round-trips back to hex, not a decoded decimal value.
     """
     m = _NUM_RE.match(text, pos)
     if not m:
         return None
     tok = m.group(0)
     if tok[:2] in ("&H", "&h"):
-        return int(tok[2:], 16), False, m.end()
+        return int(tok[2:], 16), False, m.end(), 16
     if tok[:2] in ("&O", "&o"):
-        return int(tok[2:], 8), False, m.end()
+        return int(tok[2:], 8), False, m.end(), 8
     if tok[:2] in ("&X", "&x"):
-        return int(tok[2:], 2), False, m.end()
+        return int(tok[2:], 2), False, m.end(), 2
     if "." in tok or "e" in tok.lower():
-        return float(tok), True, m.end()
-    return int(tok), False, m.end()
+        return float(tok), True, m.end(), 10
+    return int(tok), False, m.end(), 10
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +274,13 @@ def _try_match_keyword(text: str, pos: int, table: dict[str, int], max_len: int)
         key = cand.upper() if cand[:1].isalpha() else cand
         if key not in table:
             continue
-        if cand[:1].isalpha():
+        # Word-boundary check only makes sense when the candidate's own
+        # last character is itself alphanumeric (a "word" ending, like
+        # "OR") -- many SFT/function-name entries end in a literal '('
+        # (e.g. "ADD(", baked into the token text since the function
+        # always needs one), and checking the boundary there would
+        # wrongly reject "ADD(1,1)" just because '1' is alnum.
+        if cand[-1:].isalnum():
             end = pos + length
             if end < len(text) and (text[end].isalnum() or text[end] == "_"):
                 continue
@@ -293,51 +309,69 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool) -> bytes:
             continue
         num = parse_number(text, pos)
         if num is not None:
-            value, is_float, newpos = num
+            value, is_float, newpos, base = num
             if is_float:
                 out.append(219)  # packed float, decimal display
                 out += double_to_gfa_float(value)
             else:
-                out.append(200)
+                # Even pft variant per base: 200=decimal, 202=hex,
+                # 204=octal, 206=binary -- preserves the literal's
+                # original notation on round-trip (e.g. &H1F2F3F4F
+                # stays hex instead of decoding to a decimal value).
+                out.append({10: 200, 16: 202, 8: 204, 2: 206}[base])
                 push32(out, int(value))
             pos = newpos
             continue
+        # Try a variable/array reference AND both keyword tables, then take
+        # whichever match consumes the MOST text, with keywords winning a
+        # tie. A reserved word always wins a tie because the real compiler
+        # doesn't allow a user identifier to shadow one -- and several
+        # builtins collide exactly with the array-reference sigils here:
+        # every "NAME$(" string function (STR$(, CHR$(, OCT$(, MID$(, ...)
+        # parses identically to a fresh string-array reference "NAME" +
+        # "$(" sigil, and SHL&(/SHR&(/etc. collide the same way with the
+        # "&(" integer-array sigil. Checking var-ref first and only
+        # falling back to keywords for a bare, sigil-less word (as this
+        # code used to) silently turned every one of those builtins into
+        # a bogus same-named user array on first use.
         varref = parse_var_ref(text, pos)
-        if varref is not None:
+        kw = _try_match_keyword(text, pos, PFT_TEXT_TO_CODE, _MAX_PFT_WORD_LEN)
+        sft = _try_match_keyword(text, pos, SFT_TEXT_TO_CODE, _MAX_SFT_WORD_LEN)
+        var_len = (varref[3] - pos) if varref is not None else -1
+        kw_len = (kw[1] - pos) if kw is not None else -1
+        sft_len = (sft[1] - pos) if sft is not None else -1
+        best = max(var_len, kw_len, sft_len)
+        if best == -1:
+            pass
+        elif kw_len == best:
+            code, newpos = kw
+            out.append(code)
+            pos = newpos
+            continue
+        elif sft_len == best:
+            code, newpos = sft
+            out.append(208)
+            out.append(code)
+            pos = newpos
+            continue
+        else:
             type_, name, is_array, newpos = varref
-            # A bare word matching a known FUNCTION/SFT name (e.g. SQR, LEN)
-            # takes priority over treating it as a fresh identifier -- try
-            # the keyword tables first when the "sigil" consumed was empty
-            # (is_array False and newpos == end-of-word, no real sigil char).
-            word_end = newpos if newpos > pos + len(name) else pos + len(name)
-            bare = text[pos:word_end]
-            sft_hit = SFT_TEXT_TO_CODE.get(bare.upper())
-            pft_hit = PFT_TEXT_TO_CODE.get(bare.upper())
-            if newpos == pos + len(name) and (sft_hit is not None or pft_hit is not None):
-                if pft_hit is not None:
-                    out.append(pft_hit)
-                else:
-                    out.append(208)
-                    out.append(sft_hit)
-                pos = word_end
-                continue
             idx = pool.get_or_add(type_, name)
             out.append(240 + type_)
             push16(out, idx)
             pos = newpos
             continue
-        kw = _try_match_keyword(text, pos, PFT_TEXT_TO_CODE, _MAX_PFT_WORD_LEN)
-        if kw is not None:
-            code, newpos = kw
-            out.append(code)
-            pos = newpos
-            continue
-        sft = _try_match_keyword(text, pos, SFT_TEXT_TO_CODE, _MAX_SFT_WORD_LEN)
-        if sft is not None:
-            code, newpos = sft
-            out.append(208)
-            out.append(code)
-            pos = newpos
+        # Last resort: a bare identifier with no sigil and no keyword
+        # match is a LABEL reference (GOTO/GOSUB/ON...GOTO targets --
+        # labels have no sigil of their own, so parse_var_ref never
+        # matches them).
+        wm = _NAME_RE.match(text, pos)
+        if wm:
+            label_name = wm.group(0)
+            idx = pool.get_or_add(10, label_name)
+            out.append(240 + 10)
+            push16(out, idx)
+            pos = wm.end()
             continue
         raise GfaTokenizeError(f"can't tokenize {text[pos:pos+20]!r} at column {pos}")
     return bytes(out)
@@ -352,15 +386,62 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool) -> bytes:
 # "var#=", etc.) -- these are the plain "var=expr" forms without an
 # explicit LET keyword, the overwhelmingly common case in real source.
 ASSIGN_LCP = {0: 304, 1: 308, 2: 312, 3: 316, 8: 320, 9: 324}
+# Explicit "LET var=expr" form -- same operand shape as bare assignment,
+# just a different lcp per type (GFALCT's own "LET " keyword text).
+LET_ASSIGN_LCP = {0: 256, 1: 260, 2: 264, 3: 268, 8: 272, 9: 276}
 
-# FOR-loop header, always using the "STEP expr" variant (the most general
-# of each type's 3 sub-variants -- no-step / step-literal / step-expr) --
-# a plain "FOR i%=1 TO 10" with no user-written STEP is simply encoded as
-# if "STEP 1" were present, which is functionally identical GFA-BASIC
-# (the compiler treats them the same way) even though it isn't a byte-
-# for-byte reproduction of how the real editor would encode the terser
-# no-step form.
+# Bare (no LET) array-element assignment: the header just resolves the
+# array's own name (GFAVST's array suffixes, e.g. "%(", already include
+# the opening paren) -- the index expression, closing paren, and "="
+# are then just ordinary tokens in the generic stream that follows,
+# using GFAPFT's dedicated combined ")=" token. Confirmed directly
+# against a real compiled program's own bytes (a ground-truth .gfa from
+# the companion GFA Decompiler project's test archive): 'p%(0)=0'
+# encodes as lcp=336 / pop16(name) / <index expr> / pft ")=" (57) /
+# <rhs expr>, with no extra header bytes beyond the name index.
+ARRAY_ASSIGN_LCP = {4: 328, 5: 332, 6: 336, 7: 340, 12: 344, 13: 348}
+LET_ARRAY_ASSIGN_LCP = {4: 280, 5: 284, 6: 288, 7: 292, 12: 296, 13: 300}
+
+# INC/DEC/ADD/SUB/MUL/DIV as STATEMENTS (e.g. "INC i%", "ADD i%,5") --
+# confirmed directly from a comment in a ground-truth real program's own
+# source ("hell.lst", from the companion GFA Decompiler project's test
+# archive): "124(NEXT),76(FOR),256(LET),640(INC),672(DEC),704(ADD),
+# 736(SUB),768(MUL),800(DIV)". INC/DEC take just the variable (no
+# value); ADD/SUB/MUL/DIV take the variable, a literal ',', then a
+# value expression in the generic stream.
+INC_LCP = {0: 640, 2: 644, 8: 648, 9: 652}
+DEC_LCP = {0: 672, 2: 676, 8: 680, 9: 684}
+ARITH_STMT_LCP = {
+    "ADD": {0: 704, 2: 708, 8: 712, 9: 716},
+    "SUB": {0: 736, 2: 740, 8: 744, 9: 748},
+    "MUL": {0: 768, 2: 772, 8: 776, 9: 780},
+    "DIV": {0: 800, 2: 804, 8: 808, 9: 812},
+}
+
+# Array-element counterparts (e.g. "INC a%(i)", "ADD a%(i),5") -- no type5
+# ($(), string array) or type7 (!(), single-precision array) entries exist
+# for any of these six operations, confirmed directly from the same
+# decoder source used for ARRAY_ASSIGN_LCP above (those two types' lcp
+# tuples list only the two assignment forms, nothing else).
+ARRAY_INC_LCP = {4: 656, 6: 660, 12: 664, 13: 668}
+ARRAY_DEC_LCP = {4: 688, 6: 692, 12: 696, 13: 700}
+ARRAY_ARITH_LCP = {
+    "ADD": {4: 720, 6: 724, 12: 728, 13: 732},
+    "SUB": {4: 752, 6: 756, 12: 760, 13: 764},
+    "MUL": {4: 784, 6: 788, 12: 792, 13: 796},
+    "DIV": {4: 816, 6: 820, 12: 824, 13: 828},
+}
+
+# FOR-loop header. Each type has 3 sub-variant lcps spaced 4 apart --
+# no-step (base), step-literal (base+4), step-expr (base+8, the form
+# used below whenever the source actually writes a STEP) -- confirmed
+# directly against ground truth: "FOR i#=1 TO 1" (default.gfa's own
+# bytes, no STEP written) uses lcp=76 (== FOR_STEP_EXPR_LCP[0] - 8) and
+# decodes back to "FOR i#=1 TO 1" with no STEP token at all in the
+# generic stream that follows, whereas the general step-expr form always
+# emits an explicit STEP token + value.
 FOR_STEP_EXPR_LCP = {0: 84, 2: 96, 8: 108, 9: 120}
+FOR_NO_STEP_LCP = {t: lcp - 8 for t, lcp in FOR_STEP_EXPR_LCP.items()}
 # NEXT var, one representative lcp per type (of that type's own 3 sub-
 # variants, whose exact distinguishing condition isn't confirmed).
 NEXT_LCP = {0: 124, 2: 136, 8: 148, 9: 160}
@@ -376,15 +457,28 @@ _TRAILING_COMMENT_RE = re.compile(r"(?<!&)!(?!=)(.*)$")
 def _split_trailing_comment(text: str) -> tuple[str, str | None]:
     """Splits 'STATEMENT ! comment' into (statement, comment_text) --
     comment_text is None if there's no trailing '!' comment. Doesn't
-    split on '!' inside a string literal.
+    split on '!' inside a string literal, or on a '!' that's actually
+    the single-precision REAL sigil (e.g. 'a!=0 !COMMENT' has a sigil
+    '!' right after 'a' and a real comment '!' later -- distinguished
+    by an identifier character immediately before AND '=' or '(' or a
+    following identifier character immediately after, the shapes a
+    sigil actually appears in; a real comment '!' has neither).
     """
     in_str = False
     for i, c in enumerate(text):
         if c == '"':
             in_str = not in_str
-        elif c == "!" and not in_str:
-            lead = len(text[:i]) - len(text[:i].rstrip(" "))
-            return text[:i].rstrip(" "), (len(text[:i]) - len(text[:i].rstrip(" ")), text[i + 1 :])
+            continue
+        if c != "!" or in_str:
+            continue
+        # A sigil attaches to a real IDENTIFIER (starts with a letter),
+        # never to a bare numeric literal ('0!' is not a sigil use even
+        # though '0' is alnum) -- so require an actual identifier ending
+        # right at this position, not just any alnum character.
+        looks_like_sigil = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", text[:i]) is not None
+        if looks_like_sigil:
+            continue
+        return text[:i].rstrip(" "), (len(text[:i]) - len(text[:i].rstrip(" ")), text[i + 1 :])
     return text, None
 
 
@@ -397,7 +491,13 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
     stripped = text.strip()
     body = stripped
     comment: tuple[int, str] | None = None
-    if not (body.startswith("'") or body[:3].upper() == "REM"):
+    if not (
+        body.startswith("'")
+        or body[:3].upper() == "REM"
+        or body.startswith("$")
+        or body.startswith(".")
+        or (body[:4].upper() == "DATA" and (len(body) == 4 or body[4] in " \t"))
+    ):
         body, comment = _split_trailing_comment(body)
         body = body.rstrip()
 
@@ -431,11 +531,296 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             out.append(0)
         return bytes(out)
 
+    # "$directive" -- a metacommand/compiler-directive line (e.g. "$m
+    # 1000000" reserving workspace memory). GFALCT's own "$" text (lcp
+    # 1644) has no trailing space and the decoder appends the raw
+    # remainder verbatim with no auto-inserted space (unlike REM/'/DATA,
+    # which do get one) -- confirmed against sky.lst's ground-truth first
+    # line, "$m1000000".
+    if body.startswith("$"):
+        push16(out, 1644)
+        out += body[1:].encode("latin1", errors="replace")
+        out.append(0x0D)
+        if len(out) & 1:
+            out.append(0)
+        return bytes(out)
+
+    # ".directive" -- same raw-passthrough shape as "$", one lower-level
+    # GFALCT entry over (lcp 1016), used for assembler-style conditional
+    # blocks embedded directly in a listing (e.g. ".ifndef X" / ".endif").
+    if body.startswith("."):
+        push16(out, 1016)
+        out += body[1:].encode("latin1", errors="replace")
+        out.append(0x0D)
+        if len(out) & 1:
+            out.append(0)
+        return bytes(out)
+
+    # DATA payload is opaque text, never tokenized -- confirmed directly
+    # from the decoder's own dispatch, which groups lcp=468 (DATA) with
+    # REM/'/==>/$/. as a raw-passthrough-to-CR line type, not a real
+    # expression list. Ground truth includes DATA lines whose payload
+    # contains characters ('[', ']', unmatched '$', '<', '>') that would
+    # never parse as a GFA expression, so this can't go through
+    # tokenize_expr at all -- it must be copied byte-for-byte like REM,
+    # with the same single-space-after-keyword stripping.
+    if body[:4].upper() == "DATA" and (len(body) == 4 or body[4] in " \t"):
+        data_text = body[4:]
+        if data_text.startswith(" "):
+            data_text = data_text[1:]
+        push16(out, 468)
+        out += data_text.encode("latin1", errors="replace")
+        out.append(0x0D)
+        if len(out) & 1:
+            out.append(0)
+        return bytes(out)
+
+    # "DEFFN name(params)=expr" -- single-line function definition. The
+    # name resolves through the same function-name group (type 14, or 15
+    # if it ends in '$') that "> FUNCTION" declarations use -- confirmed
+    # by the shared type semantics, not a separate ground-truth sample --
+    # followed by the params as generic tokens, the combined ")=" token
+    # (pft 57, same one array-element assignment uses), then the body
+    # expression.
+    m = re.match(r"^DEFFN\s+([A-Za-z_][A-Za-z0-9_.]*\$?)\((.*)\)=(.*)$", body, re.IGNORECASE)
+    if m:
+        fname, params, value_expr = m.groups()
+        ftype = 15 if fname.endswith("$") else 14
+        # resolve_var appends GFAVST[type_] ("$" for type 15) after the
+        # pool name automatically -- storing it WITH the sigil already
+        # attached doubles it up on decode ("name$" -> "name$$").
+        idx = pool.get_or_add(ftype, fname[:-1] if ftype == 15 else fname)
+        push16(out, 228)
+        out.append(240 + ftype)
+        push16(out, idx)
+        # lcp=228 isn't special-cased in the decoder at all (falls
+        # straight into the generic stream after "DEFFN "), so unlike
+        # "> PROCEDURE" (lcp 216/24, which auto-synthesizes "(" on
+        # decode), the "(" has to be an explicit token here -- same
+        # fix as "> FUNCTION" (lcp 1796) above.
+        out.append(PFT_TEXT_TO_CODE["("])
+        if params.strip():
+            out += tokenize_expr(params, 0, len(params), pool)
+        out.append(PFT_TEXT_TO_CODE[")="])
+        out += tokenize_expr(value_expr, 0, len(value_expr), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # "SEEK #expr" / "RELSEEK #expr" -- GFALCT bakes the "#" directly into
+    # the keyword text ("SEEK #", "RELSEEK #"), with no space before the
+    # following expression (confirmed: sky.lst's ground-truth "SEEK
+    # #1,ADD(p%(17),164)" has no space after '#'), unlike bare "#channel"
+    # arguments elsewhere where "#" is its own separate PFT token.
+    m = re.match(r"^(SEEK|RELSEEK)\s*#(.*)$", body, re.IGNORECASE)
+    if m:
+        kw, rest = m.group(1).upper(), m.group(2)
+        push16(out, 832 if kw == "SEEK" else 836)
+        out += tokenize_expr(rest, 0, len(rest), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # "MID$(str$,pos,len)=value$" -- the special substring-assignment
+    # statement form (writes into the middle of an existing string in
+    # place, distinct from MID$( used as a read-only function in an
+    # expression). Its own dedicated GFALCT text "MID$(" (lcp=1220)
+    # already bakes in the opening paren, followed by the generic args,
+    # the combined ")=" token, then the value expression -- same shape
+    # as BYTE{/WORD{/CARD{/LONG{ below.
+    m = re.match(r"^MID\$\((.+)\)=(.+)$", body, re.IGNORECASE)
+    if m:
+        args_expr, value_expr = m.groups()
+        push16(out, 1220)
+        out += tokenize_expr(args_expr, 0, len(args_expr), pool)
+        out.append(PFT_TEXT_TO_CODE[")="])
+        out += tokenize_expr(value_expr, 0, len(value_expr), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # "{addr}=value" -- untyped (word-size) generic memory-write, the
+    # bare-brace counterpart of BYTE{/WORD{/CARD{/LONG{ below (lcp=920,
+    # own GFALCT text is just "{"). addr can itself contain a nested
+    # "{...}" memory READ (SFT 112, mid-expression) computing the actual
+    # target address from a pointer stored elsewhere -- ground truth:
+    # sky.lst's "{{*a|()}}=SUCC(j%)" writes through a pointer read out of
+    # array a|()'s own base address (an empty-index array reference,
+    # already handled generically since parse_var_ref only consumes the
+    # sigil+"(", leaving the immediately-following ")" as an ordinary
+    # empty-index token with nothing to fill it).
+    m = re.match(r"^\{(.+)\}=(.+)$", body)
+    if m:
+        addr_expr, value_expr = m.groups()
+        push16(out, 920)
+        out += tokenize_expr(addr_expr, 0, len(addr_expr), pool)
+        out.append(PFT_TEXT_TO_CODE["}="])
+        out += tokenize_expr(value_expr, 0, len(value_expr), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # "BYTE{addr}=value" / "WORD{...}" / "CARD{...}" / "LONG{...}" --
+    # direct memory-write statements, each its own dedicated lcp whose
+    # GFALCT text already includes the opening brace, followed by the
+    # address expression, the combined "}=" token (pft 67 -- same shape
+    # as array-element assignment's ")=" token), then the value expression.
+    m = re.match(r"^(BYTE|WORD|CARD|LONG)\{(.+)\}=(.+)$", body, re.IGNORECASE)
+    if m:
+        kw, addr_expr, value_expr = m.group(1).upper(), m.group(2), m.group(3)
+        lcp = {"CARD": 932, "BYTE": 936, "LONG": 924, "WORD": 1672}[kw]
+        push16(out, lcp)
+        out += tokenize_expr(addr_expr, 0, len(addr_expr), pool)
+        out.append(PFT_TEXT_TO_CODE["}="])
+        out += tokenize_expr(value_expr, 0, len(value_expr), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # "RETURN" (bare, lcp=28, no trailing space in its own GFALCT text)
+    # vs. "RETURN value" (used inside FUNCTIONs, lcp=68, whose GFALCT
+    # text already has the trailing space baked in) -- two genuinely
+    # different tokens sharing the same displayed keyword, confirmed
+    # from ground truth and already documented in TRIM_DOLLAR_CALLS'
+    # sibling project; conflating them (e.g. always using 28) produces
+    # 'RETURNvalue&' with the space silently swallowed.
+    m = re.match(r"^RETURN\s*$", body, re.IGNORECASE)
+    if m:
+        push16(out, 28)
+        _append_comment(out, comment)
+        return bytes(out)
+    m = re.match(r"^RETURN\s+(.*)$", body, re.IGNORECASE)
+    if m:
+        value_expr = m.group(1)
+        push16(out, 68)
+        out += tokenize_expr(value_expr, 0, len(value_expr), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # "AFTER delay GOSUB name" / "EVERY delay GOSUB name" -- confirmed
+    # from ground truth: the keyword's own lcp is followed directly by
+    # the delay expression, then the SAME mid-expression "GOSUB" pft
+    # token (76) used inside "ON expr GOSUB target" forms, then the
+    # target resolved through the procedure name group (type 11), same
+    # as standalone GOSUB above. AFTHOLD/AFTCONT/EVEHOLD/EVECONT (the
+    # other three lcp each of these keywords also has) aren't handled.
+    m = re.match(r"^(AFTER|EVERY)\s+(.*?)\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
+    if m:
+        kw, delay_expr, target = m.group(1).upper(), m.group(2), m.group(3)
+        lcp = 1460 if kw == "AFTER" else 1448
+        idx = pool.get_or_add(11, target)
+        push16(out, lcp)
+        out += tokenize_expr(delay_expr, 0, len(delay_expr), pool)
+        out.append(PFT_TEXT_TO_CODE["GOSUB"])
+        out.append(240 + 11)
+        push16(out, idx)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # "ON MENU ... GOSUB target" event-trap forms -- each has its OWN
+    # dedicated GFALCT lcp with the keyword text baked in (some, like
+    # "ON MENU KEY GOSUB ", bake in the trailing "GOSUB " too; others,
+    # like "ON MENU BUTTON ", stop short of it because BUTTON/IBOX/OBOX
+    # take numeric args first). Falling through to the generic "ON"=504
+    # keyword + expression-stream tokenizer breaks these because GFAPFT's
+    # own "MENU"/"BUTTON"/"KEY"/"MESSAGE"/"IBOX"/"OBOX" entries have NO
+    # baked-in spacing (unlike operators such as " AND "), so consecutive
+    # bare keyword tokens would render glued together with no separator.
+    # Even though these three bake "...GOSUB " fully into their own lcp
+    # text, the decoder doesn't special-case lcp 532/536/540 the way it
+    # special-cases lcp=244 plain "GOSUB " -- it falls through to the
+    # generic post-header token stream regardless, so the target must be
+    # encoded as an ordinary marker+index mid-expression reference (240+11
+    # + 16-bit pool index), same as the BUTTON/IBOX/OBOX forms below.
+    # Confirmed by round-trip: a bare index here decoded as garbage PFT
+    # bytes ("AND"/"OR"/...) instead of the target name.
+    m = re.match(r"^ON\s+MENU\s+MESSAGE\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
+    if m:
+        idx = pool.get_or_add(11, m.group(1))
+        push16(out, 536)
+        out.append(240 + 11)
+        push16(out, idx)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    m = re.match(r"^ON\s+MENU\s+KEY\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
+    if m:
+        idx = pool.get_or_add(11, m.group(1))
+        push16(out, 540)
+        out.append(240 + 11)
+        push16(out, idx)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    m = re.match(r"^ON\s+MENU\s+BUTTON\s+(.+?)\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
+    if m:
+        args_expr, target = m.group(1), m.group(2)
+        idx = pool.get_or_add(11, target)
+        push16(out, 544)
+        out += tokenize_expr(args_expr, 0, len(args_expr), pool)
+        out.append(PFT_TEXT_TO_CODE["GOSUB"])
+        out.append(240 + 11)
+        push16(out, idx)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    m = re.match(r"^ON\s+MENU\s+IBOX\s+(.+?)\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
+    if m:
+        args_expr, target = m.group(1), m.group(2)
+        idx = pool.get_or_add(11, target)
+        push16(out, 952)
+        out += tokenize_expr(args_expr, 0, len(args_expr), pool)
+        out.append(PFT_TEXT_TO_CODE["GOSUB"])
+        out.append(240 + 11)
+        push16(out, idx)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    m = re.match(r"^ON\s+MENU\s+OBOX\s+(.+?)\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
+    if m:
+        args_expr, target = m.group(1), m.group(2)
+        idx = pool.get_or_add(11, target)
+        push16(out, 956)
+        out += tokenize_expr(args_expr, 0, len(args_expr), pool)
+        out.append(PFT_TEXT_TO_CODE["GOSUB"])
+        out.append(240 + 11)
+        push16(out, idx)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # Plain "ON MENU GOSUB target" -- lcp=532 bakes in the trailing
+    # "GOSUB " already, so the body is just the target.
+    m = re.match(r"^ON\s+MENU\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
+    if m:
+        idx = pool.get_or_add(11, m.group(1))
+        push16(out, 532)
+        out.append(240 + 11)
+        push16(out, idx)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # "GOSUB name" -- confirmed from ground truth that GOSUB targets
+    # resolve through the PROCEDURE name group (type 11), the same group
+    # "> PROCEDURE"/"@name" use -- NOT the label group (type 10) that
+    # GOTO targets and "name:" declarations use. Handled as its own
+    # dedicated case (rather than falling through _SIMPLE_KEYWORDS into
+    # the generic expression tokenizer's bare-identifier-is-a-label
+    # fallback) specifically so the target lands in the right group.
+    m = re.match(r"^GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
+    if m:
+        idx = pool.get_or_add(11, m.group(1))
+        push16(out, 244)
+        push16(out, idx)
+        _append_comment(out, comment)
+        return bytes(out)
+
     m = _LABEL_RE.match(body)
     if m:
+        # lcp=252 confirmed directly against a ground-truth compiled
+        # label ("var_length:" in the companion GFA Decompiler project's
+        # test archive) -- NOT 1668 (that's the INLINE/raw-machine-code
+        # marker; using it here would make the decoder treat everything
+        # after this line as opaque binary, not further statements).
         idx = pool.get_or_add(10, m.group(1))
-        push16(out, 1668)  # generic bare-identifier/label statement marker
+        push16(out, 252)
+        out.append(240 + 10)
         push16(out, idx)
+        out.append(PFT_TEXT_TO_CODE[":"])
         _append_comment(out, comment)
         return bytes(out)
 
@@ -453,20 +838,30 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
 
     m = re.match(r"^>\s*FUNCTION\s+([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))?\s*$", body, re.IGNORECASE)
     if m:
-        # Unlike "> PROCEDURE " (lcp 216), which reads its name index
-        # directly in the header, "> FUNCTION " (lcp 1796) consumes no
-        # header bytes at all -- the function's own name is just the
-        # first ordinary variable-reference token in the stream that
-        # follows, same as any other name appearing in an expression.
+        # Unlike "> PROCEDURE " (lcp 216/24), which auto-synthesizes "("
+        # on decode by peeking at the next byte, "> FUNCTION " (lcp 1796)
+        # has NO such logic at all in the decoder (it just sets
+        # handled_prefix and falls straight into the generic stream) --
+        # so the "(" has to be an explicit token here. Confirmed directly
+        # against ground truth (hell.gfa's own bytes for a FUNCTION with
+        # args): name-ref byte, then pft=35 "(" literally in the stream,
+        # THEN the args. Omitting it is how '@myproc(1,2)' lost its "("
+        # the first time this exact mistake was made for lcp=248 -- same
+        # root cause, different lcp.
         fname = m.group(1)
         ftype = 15 if fname.endswith("$") else 14
         push16(out, 1796)
-        idx = pool.get_or_add(ftype, fname)
+        # resolve_var appends GFAVST[15] ("$") after the pool name
+        # automatically -- storing it with the sigil already attached
+        # doubles it up on decode ("name$" -> "name$$").
+        idx = pool.get_or_add(ftype, fname[:-1] if ftype == 15 else fname)
         out.append(240 + ftype)
         push16(out, idx)
         args = m.group(3)
-        if args is not None and args.strip():
-            out += tokenize_expr(args, 0, len(args), pool)
+        if args is not None:
+            out.append(PFT_TEXT_TO_CODE["("])
+            if args.strip():
+                out += tokenize_expr(args, 0, len(args), pool)
             out.append(PFT_TEXT_TO_CODE[")"])
         _append_comment(out, comment)
         return bytes(out)
@@ -478,7 +873,10 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
     if m:
         name, sigil, start_expr, to_expr, step_expr = m.groups()
         type_ = SUFFIX_TO_TYPE.get(sigil)
-        lcp = FOR_STEP_EXPR_LCP.get(type_) if type_ is not None else None
+        if step_expr is None:
+            lcp = FOR_NO_STEP_LCP.get(type_) if type_ is not None else None
+        else:
+            lcp = FOR_STEP_EXPR_LCP.get(type_) if type_ is not None else None
         if lcp is not None:
             idx = pool.get_or_add(type_, name)
             push16(out, lcp)
@@ -486,9 +884,9 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             out += tokenize_expr(start_expr, 0, len(start_expr), pool)
             out.append(PFT_TEXT_TO_CODE["TO"])
             out += tokenize_expr(to_expr, 0, len(to_expr), pool)
-            out.append(PFT_TEXT_TO_CODE["STEP"])
-            step_text = step_expr if step_expr is not None else "1"
-            out += tokenize_expr(step_text, 0, len(step_text), pool)
+            if step_expr is not None:
+                out.append(PFT_TEXT_TO_CODE["STEP"])
+                out += tokenize_expr(step_expr, 0, len(step_expr), pool)
             _append_comment(out, comment)
             return bytes(out)
 
@@ -504,6 +902,127 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             push16(out, idx)
             _append_comment(out, comment)
             return bytes(out)
+
+    m = re.match(
+        r"^(INC|DEC)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\((.*?)\)\s*$", body, re.IGNORECASE,
+    )
+    if m:
+        kw, name, sigil, index_expr = m.group(1).upper(), m.group(2), m.group(3), m.group(4)
+        type_ = SUFFIX_TO_TYPE.get(sigil + "(")
+        lcp = (ARRAY_INC_LCP if kw == "INC" else ARRAY_DEC_LCP).get(type_) if type_ is not None else None
+        if lcp is not None:
+            idx = pool.get_or_add(type_, name)
+            push16(out, lcp)
+            push16(out, idx)
+            out += tokenize_expr(index_expr, 0, len(index_expr), pool)
+            out.append(PFT_TEXT_TO_CODE[")"])
+            _append_comment(out, comment)
+            return bytes(out)
+
+    m = re.match(
+        r"^(INC|DEC)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\s*$", body, re.IGNORECASE,
+    )
+    if m:
+        kw, name, sigil = m.group(1).upper(), m.group(2), m.group(3)
+        type_ = SUFFIX_TO_TYPE.get(sigil)
+        lcp = (INC_LCP if kw == "INC" else DEC_LCP).get(type_) if type_ is not None else None
+        if lcp is not None:
+            idx = pool.get_or_add(type_, name)
+            push16(out, lcp)
+            push16(out, idx)
+            _append_comment(out, comment)
+            return bytes(out)
+
+    m = re.match(
+        r"^(ADD|SUB|MUL|DIV)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\((.*?)\)\s*,\s*(.*)$", body, re.IGNORECASE,
+    )
+    if m:
+        kw, name, sigil, index_expr, value_expr = m.groups()
+        kw = kw.upper()
+        type_ = SUFFIX_TO_TYPE.get(sigil + "(")
+        lcp = ARRAY_ARITH_LCP.get(kw, {}).get(type_) if type_ is not None else None
+        if lcp is not None:
+            idx = pool.get_or_add(type_, name)
+            push16(out, lcp)
+            push16(out, idx)
+            out += tokenize_expr(index_expr, 0, len(index_expr), pool)
+            # Array ADD/SUB/MUL/DIV use two SEPARATE tokens here (plain
+            # ")" then plain ","), unlike the scalar form (whose header
+            # already implies the comma) and unlike array assignment
+            # (whose combined ")=" token covers both at once) -- confirmed
+            # directly against a ground-truth compiled 'ADD i#(1),1'.
+            out.append(PFT_TEXT_TO_CODE[")"])
+            out.append(PFT_TEXT_TO_CODE[","])
+            out += tokenize_expr(value_expr, 0, len(value_expr), pool)
+            _append_comment(out, comment)
+            return bytes(out)
+
+    m = re.match(
+        r"^(ADD|SUB|MUL|DIV)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\s*,\s*(.*)$", body, re.IGNORECASE,
+    )
+    if m:
+        kw, name, sigil, value_expr = m.group(1).upper(), m.group(2), m.group(3), m.group(4)
+        type_ = SUFFIX_TO_TYPE.get(sigil)
+        lcp = ARITH_STMT_LCP.get(kw, {}).get(type_) if type_ is not None else None
+        if lcp is not None:
+            idx = pool.get_or_add(type_, name)
+            push16(out, lcp)
+            push16(out, idx)
+            # The header's own decode already appends "," after the
+            # variable (see ARITH_STMT_LCP's docstring) -- no separate
+            # comma token needed here.
+            out += tokenize_expr(value_expr, 0, len(value_expr), pool)
+            _append_comment(out, comment)
+            return bytes(out)
+
+    m = re.match(
+        r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\((.*?)\)=(.*)$",
+        body,
+    )
+    if m and (m.group(2) + "(") in SUFFIX_TO_TYPE:
+        name, sigil, index_expr, rhs = m.groups()
+        type_ = SUFFIX_TO_TYPE[sigil + "("]
+        lcp = ARRAY_ASSIGN_LCP.get(type_)
+        if lcp is not None:
+            idx = pool.get_or_add(type_, name)
+            push16(out, lcp)
+            push16(out, idx)
+            out += tokenize_expr(index_expr, 0, len(index_expr), pool)
+            out.append(PFT_TEXT_TO_CODE[")="])
+            out += tokenize_expr(rhs, 0, len(rhs), pool)
+            _append_comment(out, comment)
+            return bytes(out)
+
+    m = re.match(r"^LET\s+", body, re.IGNORECASE)
+    if m:
+        let_rest = body[m.end() :]
+        arr_m = re.match(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\((.*?)\)=(.*)$", let_rest)
+        if arr_m and (arr_m.group(2) + "(") in SUFFIX_TO_TYPE:
+            name, sigil, index_expr, rhs = arr_m.groups()
+            type_ = SUFFIX_TO_TYPE[sigil + "("]
+            lcp = LET_ARRAY_ASSIGN_LCP.get(type_)
+            if lcp is not None:
+                idx = pool.get_or_add(type_, name)
+                push16(out, lcp)
+                push16(out, idx)
+                out += tokenize_expr(index_expr, 0, len(index_expr), pool)
+                out.append(PFT_TEXT_TO_CODE[")="])
+                out += tokenize_expr(rhs, 0, len(rhs), pool)
+                _append_comment(out, comment)
+                return bytes(out)
+        am = _ASSIGN_RE.match(let_rest)
+        if am and am.group(2) in SUFFIX_TO_TYPE:
+            name, sigil = am.group(1), am.group(2)
+            type_ = SUFFIX_TO_TYPE[sigil]
+            lcp = LET_ASSIGN_LCP.get(type_)
+            if lcp is not None:
+                idx = pool.get_or_add(type_, name)
+                push16(out, lcp)
+                push16(out, idx)
+                rhs = let_rest[am.end() :]
+                out += tokenize_expr(rhs, 0, len(rhs), pool)
+                _append_comment(out, comment)
+                return bytes(out)
 
     m = _ASSIGN_RE.match(body)
     if m and m.group(2) in SUFFIX_TO_TYPE:
@@ -531,13 +1050,60 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         _append_comment(out, comment)
         return bytes(out)
 
-    # Fallback: treat the whole line as a generic expression/call statement
-    # (covers bare '@proc(...)' calls once '@' is consumed as a plain PFT
-    # token, and other constructs not given a dedicated header above).
-    push16(out, 1668)
-    out += tokenize_expr(body, 0, len(body), pool)
-    _append_comment(out, comment)
-    return bytes(out)
+    # "@name" / "@name(args)" -- direct PROCEDURE/FUNCTION call syntax.
+    # lcp=248 confirmed against ground truth ("@procedure" in the
+    # companion GFA Decompiler project's test archive): resolves the
+    # callee's name directly in the header (type 11, same group as ">
+    # PROCEDURE" declarations). Unlike "> PROCEDURE"/"> FUNCTION" (whose
+    # decoder peeks ahead and synthesizes "(" without consuming a token),
+    # lcp 248's own decode branch (240,244,248) does NOT auto-add "(" --
+    # confirmed the hard way (round-tripped '@myproc(1,2)' came back
+    # missing its open paren until this was added explicitly).
+    m = re.match(r"^@([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))?\s*$", body)
+    if m:
+        name = m.group(1)
+        ptype = 15 if name.endswith("$") else 11
+        # resolve_var appends GFAVST[15] ("$") after the pool name
+        # automatically -- storing it with the sigil already attached
+        # doubles it up on decode ("name$" -> "name$$").
+        idx = pool.get_or_add(ptype, name[:-1] if ptype == 15 else name)
+        push16(out, 248)
+        push16(out, idx)
+        args = m.group(3)
+        if args is not None and args.strip():
+            out.append(PFT_TEXT_TO_CODE["("])
+            out += tokenize_expr(args, 0, len(args), pool)
+            out.append(PFT_TEXT_TO_CODE[")"])
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # Bare "name" / "name(args)" (no leading "@") -- a PROCEDURE call
+    # using GFA-BASIC's other, "@"-less call syntax. lcp=240 confirmed
+    # against ground truth both for a bare name alone ("procedure", same
+    # test archive) AND for one with a full argument list (sky.lst's
+    # "gf4tp_debug(...)", ground-truth lcp=240) -- the args, when
+    # present, are just an ordinary "(" + generic tokens + ")" in the
+    # stream that follows, identical in shape to "@name(args)" (lcp=248)
+    # just without the leading "@" marker.
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))?\s*$", body)
+    if m:
+        name = m.group(1)
+        ptype = 15 if name.endswith("$") else 11
+        # resolve_var appends GFAVST[15] ("$") after the pool name
+        # automatically -- storing it with the sigil already attached
+        # doubles it up on decode ("name$" -> "name$$").
+        idx = pool.get_or_add(ptype, name[:-1] if ptype == 15 else name)
+        push16(out, 240)
+        push16(out, idx)
+        args = m.group(3)
+        if args is not None and args.strip():
+            out.append(PFT_TEXT_TO_CODE["("])
+            out += tokenize_expr(args, 0, len(args), pool)
+            out.append(PFT_TEXT_TO_CODE[")"])
+        _append_comment(out, comment)
+        return bytes(out)
+
+    raise GfaTokenizeError(f"unrecognized statement: {body!r}")
 
 
 def _append_comment(out: bytearray, comment: tuple[int, str] | None) -> None:
@@ -576,15 +1142,33 @@ HEADER_SKIP4_LCP = {4, 12, 16, 20, 32, 48, 56, 60, 64, 172, 176, 196, 200, 204, 
 # text is the plain/general-purpose form.
 _SIMPLE_KEYWORDS = {
     "DO": 0, "LOOP": 4, "REPEAT": 8, "UNTIL": 12, "WHILE": 16, "WEND": 20,
-    "RETURN": 28, "IF": 32, "ENDIF": 36, "ENDFUNC": 44,
+    "IF": 32, "ENDIF": 36, "ENDFUNC": 44,
     "SELECT": 48, "ENDSELECT": 52, "ELSE": 56, "CASE": 224,
-    "EXIT IF": 172, "LOCAL": 212, "PRINT": 588,
+    "EXIT IF": 172, "LOCAL": 212, "PRINT": 588, "DIM": 840, "DEFAULT": 60,
+    "~": 964,
+    "END": 496, "STOP": 1360, "CONT": 1268, "GOTO": 232,
+    "ON": 504, "RESTORE": 236, "READ": 1488, "POKE": 388,
+    "CLR": 1256, "ERASE": 1288, "SWAP": 472, "INPUT": 1472,
+    "SPOKE": 400, "DPOKE": 392, "LPOKE": 396, "OPEN": 1060, "CLOSE": 1072,
+    "OUT": 1228, "BSAVE": 1616, "BLOAD": 1620, "LPRINT": 1212,
+    "OUT&": 1680, "OUT%": 1684, "RESERVE": 416, "BPUT": 448, "BGET": 444,
+    "ARRAYFILL": 1588, "LINE INPUT": 616, "BMOVE": 852, "DELETE": 1404,
+    "CLS": 1260,
+    "DO WHILE": 196, "DO UNTIL": 200, "LOOP WHILE": 204, "LOOP UNTIL": 208,
+    "ELSE IF": 64,
 }
 
 
 def _match_leading_keyword(body: str) -> tuple[int, int] | None:
     upper = body.upper()
     for kw in sorted(_SIMPLE_KEYWORDS, key=len, reverse=True):
+        if not kw[:1].isalpha():
+            # Punctuation-led keywords (e.g. "~EVNT_TIMER(1)", GFA's
+            # direct XBIOS/GEMDOS/AES call syntax) attach directly to
+            # whatever follows -- no space/paren separator to require.
+            if upper.startswith(kw):
+                return _SIMPLE_KEYWORDS[kw], len(kw)
+            continue
         if upper == kw or upper.startswith(kw + " ") or upper.startswith(kw + "("):
             return _SIMPLE_KEYWORDS[kw], len(kw)
     return None

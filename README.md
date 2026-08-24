@@ -39,17 +39,21 @@ Verified by round-tripping generated `.gfa` files back through the companion Det
 
 ## Supported Constructs (current coverage)
 
-- Scalar assignment (`x%=5`, `y$="text"`, all six sigils: `#` `$` `%` `!` `&` `|`), with a full expression on the right-hand side (arithmetic, comparisons, function calls, string literals, numbers in decimal/`&H`/`&O`/`&X`).
-- `IF`/`ENDIF`, `FOR`/`NEXT` (numeric/integer loop variable types), comments (`'` and `REM`, both standalone and trailing `!`-comments), blank lines, labels (`name:`).
-- `> PROCEDURE name(args)` / `> FUNCTION name(args)` declarations and bare `RETURN` / `RETURN value`.
-- Bare statement/procedure-call lines (`@procname(args)`, `PRINT expr`) via a generic expression fallback.
+- Scalar assignment (`x%=5`, `y$="text"`, all six sigils: `#` `$` `%` `!` `&` `|`, with or without an explicit `LET`) and **array-element assignment** (`a%(i)=5`, index expression can be arbitrary), with a full expression on the right-hand side (arithmetic, comparisons, function/built-in calls, string literals, numbers in decimal/`&H`/`&O`/`&X`). Array-element *reads* work anywhere an expression is expected (e.g. `y%=a%(0)+3`).
+- Every built-in function/operator in the keyword tables, including the ones whose names collide with the array-reference sigils (`STR$(`, `CHR$(`, `OCT$(`, `MID$(`, `SHL&(`, and the ~30 others like them) — these resolve as the built-in, not a same-named user array.
+- `MID$(str$,pos,len)=value$`, the in-place substring-assignment statement form (distinct from `MID$(` used as a read-only function).
+- `DIM`, `ARRAYFILL`.
+- `IF`/`ENDIF`/`ELSE`/`ELSE IF`, `DO`/`LOOP`, `DO WHILE`/`LOOP UNTIL` and the other `DO`/`LOOP` compound forms, `WHILE`/`WEND`, `REPEAT`/`UNTIL`, `SELECT`/`CASE`/`DEFAULT`/`ENDSELECT`, `FOR`/`NEXT` (numeric/integer loop variable types, with or without an explicit `STEP`) — all verified round-trip.
+- `INC`/`DEC` and the `ADD`/`SUB`/`MUL`/`DIV` compound-assignment statements (`INC i%`, `ADD i%,5`, `INC a%(i)`) for both scalar and array-element targets.
+- `LOCAL`, comments (`'` and `REM`, both standalone and trailing `!`-comments — correctly distinguished from a `!` single-precision sigil like `a!=0`), blank lines, labels (`name:`), `$directive`/`.directive` metacommand lines (raw passthrough, e.g. `$m 1000000`, `.ifndef X`).
+- `> PROCEDURE name(args)` / `> FUNCTION name(args)` declarations, `DEFFN name(args)=expr`, bare `RETURN` / `RETURN value`, and procedure calls via `@name(args)` or bare `name(args)` (GFA-BASIC allows both).
+- `GOTO`, `GOSUB` (including `AFTER`/`EVERY ... GOSUB` and all six `ON MENU ... GOSUB` event-trap forms), `ON`, `RESTORE`, `READ`, `DATA` (opaque payload, never tokenized as an expression — matching how the real compiler treats it), `END`, `STOP`, `CONT`, `SWAP`, `ERASE`, `CLR`, `INPUT`, `LINE INPUT`, `POKE`/`DPOKE`/`LPOKE`/`SPOKE`, `BYTE{`/`WORD{`/`CARD{`/`LONG{`/`{` memory-write statements, `OPEN`, `CLOSE`, `OUT`/`OUT&`/`OUT%`, `SEEK`/`RELSEEK`, `BSAVE`/`BLOAD`, `BPUT`/`BGET`, `BMOVE` (including the `V:` address-of operator), `RESERVE`, `DELETE`, `CLS`, `PRINT`/`LPRINT`, and `~`-prefixed direct calls (`~EVNT_TIMER(1)`, `~GEMDOS(...)`) as statement keywords.
+- Hex/octal/binary numeric literals (`&H1F`, `&O17`, `&X101`) preserve their original notation on round-trip, including the real compiler's own lossy behavior for values needing the top bit of a 32-bit word (e.g. `&HFFFFFFFF` becomes `&H-1`, exactly as the real compiler's own output does).
 
 ## Known Limitations
 
-- **Array element assignment** (`a%(i)=5`) is not yet encoded — the header this needs wasn't confirmed before this first release shipped. Attempting it currently either mis-encodes or falls through to the generic expression path, which does **not** produce a correct array-target statement.
-- **`FOR` loops always emit an explicit `STEP`** (defaulting to `STEP 1` when the source omits one) — functionally identical GFA-BASIC, since the compiler treats an implicit and explicit `STEP 1` the same way, but not a byte-for-byte reproduction of how the real editor encodes the terser no-step form.
-- `DO`/`LOOP`/`WHILE`/`WEND`/`SELECT`/`CASE`/`ENDSELECT`/`ELSE`/`LOCAL` keywords are wired up but have not been round-trip verified as thoroughly as the constructs listed above.
-- `DATA` statements, `INLINE` (raw machine code) statements, and multi-statement lines (`:`-separated) are not supported.
+- `INLINE` (raw machine code) statements and multi-statement lines (`:`-separated) are not supported at all.
 - Two editor-navigation bytes this format reserves per `IF`/`FOR`/`NEXT`/etc. header (almost certainly a back-reference the editor uses for brace-jump/fold navigation) are zero-filled rather than computed — this doesn't affect loading or compiling the file, but the real editor's navigation features for these lines may not work as expected.
+- Identifier-pool indices are always written in the 2-byte form; the real editor uses a shorter 1-byte form when an index fits, so output files are functionally correct but not always byte-identical to what the real editor would produce.
 
-This is a first release covering the common cases; array assignment and the less-verified control-flow keywords are the natural next additions.
+Verified with a byte-for-byte-clean round trip (tokenize, then decode with the companion Detokenizer, then diff against the original source) across a wide range of hand-written test programs, plus the *entirety* of an independent, real GFA-BASIC 3.x compiler's own bundled test archive: a 276-line exhaustive language-feature test file, two real-world programs of 3,626 and 1,738 lines, and several smaller edge-case files — over 5,900 lines with zero diffs.
