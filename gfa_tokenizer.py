@@ -154,7 +154,13 @@ class IdentPool:
         for names in self.groups:
             start = len(out)
             for name in names:
-                raw = name.encode("latin1", errors="replace")
+                # Real GFA-BASIC always stores pool identifiers upper-
+                # case, regardless of how the user typed them -- this
+                # project's own Detokenizer already lowercases on read
+                # to compensate (_to_lower_ascii), which is why this
+                # asymmetry went unnoticed until compared directly
+                # against a real editor-saved file byte-for-byte.
+                raw = name.upper().encode("latin1", errors="replace")
                 if len(raw) > 255:
                     raise GfaTokenizeError(f"identifier too long: {name!r}")
                 out.append(len(raw))
@@ -289,10 +295,37 @@ def _try_match_keyword(text: str, pos: int, table: dict[str, int], max_len: int)
     return best
 
 
-def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool) -> bytes:
+def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False) -> bytes:
     out = bytearray()
+    # Set right after emitting an array-reference token ('name(' --
+    # already includes the '(' as part of its sigil, see resolve_var);
+    # consumed (and cleared) by the very next numeric literal, which
+    # then gets the special odd/filler form below instead of the plain
+    # one every literal after it in the same dimension/argument list
+    # uses. Confirmed against the real compiler's own bundled test
+    # archive (gb36test_archive/hell.gfa): 'DIM var$(16,1024),p%(38)'
+    # -- 16 (right after 'var$(') gets the odd form, 1024 (after a bare
+    # ',', no new array-ref) gets the plain one, then 38 (right after
+    # the new 'p%(') gets the odd form again. Cleared on any other
+    # token too (not just a literal), so an index expression that isn't
+    # a bare literal doesn't leave this sitting stale for something
+    # unrelated later in the same call.
+    #
+    # The `array_open` parameter lets a caller seed this as already-True
+    # for the first token: ARRAY_ASSIGN_LCP/LET_ARRAY_ASSIGN_LCP's index
+    # expression (e.g. 'a$(2)=...') never sees a var-ref token of its
+    # own here -- the array's name+type is already encoded directly in
+    # the statement header -- so without this, its first index literal
+    # would wrongly get the plain form. Confirmed against
+    # gb36test_archive/default.gfa's own 'LET i$(1)="AA"', which matches
+    # this project's tokenizer output byte-for-byte once seeded this way.
     while pos < end:
         c = text[pos]
+        # Consumed by this iteration's branches below (the numeric-
+        # literal one specifically); cleared for every OTHER kind of
+        # token automatically, and re-armed only by the var-ref branch
+        # further down when it just emitted a fresh array-reference.
+        was_array_open, array_open = array_open, False
         if c == " ":
             pos += 1
             continue
@@ -313,12 +346,43 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool) -> bytes:
             if is_float:
                 out.append(219)  # packed float, decimal display
                 out += double_to_gfa_float(value)
-            else:
-                # Even pft variant per base: 200=decimal, 202=hex,
-                # 204=octal, 206=binary -- preserves the literal's
-                # original notation on round-trip (e.g. &H1F2F3F4F
-                # stays hex instead of decoding to a decimal value).
+            elif not was_array_open:
+                # Plain form: no filler byte. Used for every numeric
+                # literal except the first one right after an array
+                # reference opens (see was_array_open's own comment
+                # above and the odd/filler branch just below).
                 out.append({10: 200, 16: 202, 8: 204, 2: 206}[base])
+                push32(out, int(value))
+            else:
+                # Base determines the *pair* of pft codes (200/201=
+                # decimal, 202/203=hex, 204/205=octal, 206/207=binary --
+                # preserves the literal's original notation on round-trip,
+                # e.g. &H1F2F3F4F stays hex instead of decoding to a
+                # decimal value). Real GFA-BASIC always emits the ODD
+                # code of the pair, immediately followed by one filler
+                # byte (value irrelevant -- the decoder's own 'if pft in
+                # (201,203,205,207): pos += 1' unconditionally skips it
+                # without ever reading it back), then the 4-byte number.
+                # Confirmed against the real compiler's own bundled test
+                # archive (gb36test_archive/default.gfa): 'DIM a$(5)'
+                # uses a zero filler byte ('c9 00 00000005'), while 'LET
+                # i%=1' and the &H/&O/&X literal forms happen to reuse
+                # each pair's own even code as filler instead ('c9 c8
+                # 00000001', 'cb ca ...', etc.) -- different values,
+                # same structural shape, confirming the filler's value
+                # truly doesn't matter and 0x00 is a safe, simple choice.
+                # The even code alone (this function's previous,
+                # un-filler'd output) decodes fine through this project's
+                # own lenient detokenizer -- which is exactly why round-
+                # tripping through this project's own tokenizer/
+                # detokenizer pair never caught the real compiler
+                # rejecting it -- but the real editor doesn't accept
+                # files missing that filler byte, on any literal,
+                # anywhere: this bug affected every numeric literal this
+                # tool has ever produced, not just array indices.
+                even = {10: 200, 16: 202, 8: 204, 2: 206}[base]
+                out.append(even + 1)
+                out.append(0)
                 push32(out, int(value))
             pos = newpos
             continue
@@ -357,9 +421,25 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool) -> bytes:
         else:
             type_, name, is_array, newpos = varref
             idx = pool.get_or_add(type_, name)
-            out.append(240 + type_)
-            push16(out, idx)
+            # Real GFA-BASIC uses the byte-sized var-index form
+            # (pft 224-239) whenever the pool index fits in a byte,
+            # falling back to the word-sized form (240-255, this
+            # function's previous unconditional choice) only once it
+            # doesn't -- confirmed against a Hatari-compiled test
+            # program in the companion GFA Decompiler project, whose
+            # 'a$(2)'/'b$(1,1)' references both used the byte form.
+            # Always emitting the word form still decodes fine through
+            # this project's own detokenizer, but isn't what the real
+            # editor itself ever produces.
+            if idx < 256:
+                out.append(224 + type_)
+                out.append(idx)
+            else:
+                out.append(240 + type_)
+                push16(out, idx)
             pos = newpos
+            if is_array:
+                array_open = True
             continue
         # Last resort: a bare identifier with no sigil and no keyword
         # match is a LABEL reference (GOTO/GOSUB/ON...GOTO targets --
@@ -914,7 +994,7 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             idx = pool.get_or_add(type_, name)
             push16(out, lcp)
             push16(out, idx)
-            out += tokenize_expr(index_expr, 0, len(index_expr), pool)
+            out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
             out.append(PFT_TEXT_TO_CODE[")"])
             _append_comment(out, comment)
             return bytes(out)
@@ -945,7 +1025,7 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             idx = pool.get_or_add(type_, name)
             push16(out, lcp)
             push16(out, idx)
-            out += tokenize_expr(index_expr, 0, len(index_expr), pool)
+            out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
             # Array ADD/SUB/MUL/DIV use two SEPARATE tokens here (plain
             # ")" then plain ","), unlike the scalar form (whose header
             # already implies the comma) and unlike array assignment
@@ -987,7 +1067,7 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             idx = pool.get_or_add(type_, name)
             push16(out, lcp)
             push16(out, idx)
-            out += tokenize_expr(index_expr, 0, len(index_expr), pool)
+            out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
             out.append(PFT_TEXT_TO_CODE[")="])
             out += tokenize_expr(rhs, 0, len(rhs), pool)
             _append_comment(out, comment)
@@ -1005,7 +1085,7 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
                 idx = pool.get_or_add(type_, name)
                 push16(out, lcp)
                 push16(out, idx)
-                out += tokenize_expr(index_expr, 0, len(index_expr), pool)
+                out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
                 out.append(PFT_TEXT_TO_CODE[")="])
                 out += tokenize_expr(rhs, 0, len(rhs), pool)
                 _append_comment(out, comment)
@@ -1108,13 +1188,25 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
 
 def _append_comment(out: bytearray, comment: tuple[int, str] | None) -> None:
     if comment is None:
-        # No trailing padding here: a plain statement line has no
-        # terminator of its own, so render_line's generic token loop
-        # (`while pos < len(raw)`) would misread any padding byte we
-        # added as a real token (pft=0 decodes as a bare 'AND', not a
-        # no-op) -- unlike the comment path below, whose own explicit
-        # 0x0D terminator lets the decoder skip a parity byte by
-        # advancing `pos` past it without ever treating it as a token.
+        # Every real statement line ends with pft=70 (the same
+        # "comment marker / end-of-line sentinel" the decoder already
+        # treats as a harmless no-comment terminator when nothing
+        # follows it), then an even-byte pad if needed -- confirmed
+        # against a real GFA-BASIC editor's own tokenized output
+        # (the companion GFA Decompiler project's Hatari-based
+        # verification): every one of a small test program's 8 lines
+        # matched byte-for-byte once this sentinel+pad was accounted
+        # for, with no other difference. The previous version of this
+        # function omitted it entirely, reasoning (wrongly, it turns
+        # out) that our own detokenizer's lenient `while pos < len(raw)`
+        # loop tolerates its absence -- true, but the real editor
+        # doesn't accept files missing it: this was a real, confirmed
+        # bug, not a style choice (round-tripping through this project's
+        # own tokenizer/detokenizer pair never caught it, since the
+        # detokenizer never required the byte it was missing).
+        out.append(70)
+        if len(out) & 1:
+            out.append(0)
         return
     n, ctext = comment
     out.append(70)
@@ -1218,8 +1310,37 @@ def tokenize_source(text: str) -> bytes:
     #                 what sep[0..16] is for) -- matching parse_identifier_
     #                 pool's own `(sep[20+i] - sep[19+i]) // 4` extraction,
     #                 where the divide-by-4 recovers a plain entry count
-    #   sep[35..37] = trailing variable-value storage area (left empty,
-    #                 held at the same final offset)
+    #   sep[35..37] = trailing variable-value storage area. NOT a byte
+    #                 offset into this file's own content -- confirmed by
+    #                 comparing two real GFA-BASIC-editor-saved files with
+    #                 identical variable sets and identical total file
+    #                 length but different sep[36]/[37] values: this is a
+    #                 runtime storage-size hint for the loader/interpreter
+    #                 to pre-allocate space for the program's variables
+    #                 when it starts running, not something physically
+    #                 present in the .gfa file. Previously left at the
+    #                 same value as sep[35] (i.e. "zero extra") -- always
+    #                 wrong, and load-bombing the real editor on any
+    #                 program actually using its declared variables
+    #                 (confirmed against a Hatari-compiled test program in
+    #                 the companion GFA Decompiler project). Sized here
+    #                 per GFAVST type index using each GFA-BASIC scalar
+    #                 type's own real runtime size (REAL=8, STRING
+    #                 descriptor=6, INTEGER=2, LONG=4, BYTE=1) and the same
+    #                 6-byte descriptor size for every array type still
+    #                 (confirmed for STRING scalars/arrays specifically;
+    #                 the sizes for other scalar/array types are
+    #                 documentation-derived, not yet independently
+    #                 ground-truth-confirmed the way STRING's is).
+    #                 PROCEDURE/FUNCTION/label names (indices 10/11/14)
+    #                 aren't variables and contribute nothing.
+    TRAILING_STORAGE_SIZE = {
+        0: 8, 1: 6, 2: 2, 3: 4, 4: 6, 5: 6, 6: 6, 7: 6,
+        8: 4, 9: 1, 12: 6, 13: 6, 15: 6,
+    }
+    trailing_extra = sum(
+        TRAILING_STORAGE_SIZE.get(i, 0) * group_entry_counts[i] for i in range(16)
+    )
     sep = [0] * 38
     running = 0
     for i in range(16):
@@ -1227,15 +1348,21 @@ def tokenize_source(text: str) -> bytes:
         running += group_byte_counts[i]
     sep[16] = running
     sep[17] = sep[16]
-    sep[18] = sep[16]
     listing_end = sep[16] + len(listing)
     sep[19] = listing_end
+    # sep[18] = start of the END_OF_PROGRAM sentinel's own encoded line
+    # (2-byte size prefix + 2-byte lcp=180 content -- always exactly 4
+    # bytes, the last entry in `encoded`/`listing`) -- confirmed against
+    # a real GFA-BASIC editor's own saved file, whose sep[18] was
+    # consistently sep[19]-4 rather than sep[16] (this function's
+    # previous placeholder assumption).
+    sep[18] = listing_end - 4
     running_count = listing_end
     for i in range(16):
         running_count += 4 * group_entry_counts[i]
         sep[20 + i] = running_count
-    sep[36] = running_count
-    sep[37] = running_count
+    sep[36] = running_count + trailing_extra
+    sep[37] = sep[36]
 
     out = bytearray()
     out.append(0x00)  # SAVE (not PSAVE)
