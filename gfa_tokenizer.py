@@ -805,6 +805,34 @@ NEXT_LCP = {0: 124, 2: 136, 8: 148, 9: 160}
 # Simple no-argument / fixed-text statements: matched directly against
 # GFALCT text, no special header beyond the keyword itself.
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])=(?!=)")
+
+_NEG_INT_RHS_RE = re.compile(r"^-(\d+)\s*$")
+
+
+def _try_negated_int_literal_rhs(rhs: str) -> bytes | None:
+    """A bare scalar assignment whose ENTIRE right-hand side is a negated
+    base-10 integer literal ('v%=-1', nothing else on the right) encodes
+    the '-1' directly as a negative integer literal -- pft 201 (the ODD
+    code of the 200/201 decimal pair) with the pair's own EVEN code (200)
+    as filler, then the value's 32-bit two's-complement bytes -- NOT via
+    the opcode-30 unary-minus + packed-float mechanism confirmed
+    elsewhere (e.g. inside a comparison like 'UNTIL z&=-1' in
+    gb36test_archive/hell.gfa). Confirmed 2026-08-25 via a real hand-
+    typed-and-compiled 'v%=-1': its bytes are '[201][200][FF FF FF FF]',
+    completely different from the comparison-context shape. Scoped
+    narrowly to this exact case -- a unary-minus'd integer literal
+    anywhere else (inside a larger expression, a comparison, a function
+    argument) still uses the other, separately-confirmed encoding, since
+    there's no evidence this same literal-folding happens there too.
+    """
+    m = _NEG_INT_RHS_RE.match(rhs)
+    if not m:
+        return None
+    out = bytearray()
+    out.append(201)
+    out.append(200)
+    push32(out, -int(m.group(1)))
+    return bytes(out)
 _LABEL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*):\s*$")
 _COMMENT_RE = re.compile(r"^\s*(!|REM\b)\s?(.*)$", re.IGNORECASE)
 _TRAILING_COMMENT_RE = re.compile(r"(?<!&)!(?!=)(.*)$")
@@ -1391,7 +1419,8 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
                 push16(out, lcp)
                 push16(out, idx)
                 rhs = let_rest[am.end() :]
-                out += tokenize_expr(rhs, 0, len(rhs), pool)
+                neg_lit = _try_negated_int_literal_rhs(rhs)
+                out += neg_lit if neg_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
                 _append_comment(out, comment)
                 return bytes(out)
 
@@ -1405,7 +1434,8 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             push16(out, lcp)
             push16(out, idx)
             rhs = body[m.end() :]
-            out += tokenize_expr(rhs, 0, len(rhs), pool)
+            neg_lit = _try_negated_int_literal_rhs(rhs)
+            out += neg_lit if neg_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
             _append_comment(out, comment)
             return bytes(out)
 
