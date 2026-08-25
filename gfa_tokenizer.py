@@ -90,6 +90,86 @@ for _i, _name in enumerate(GFAPFT):
     if key not in PFT_TEXT_TO_CODE:
         PFT_TEXT_TO_CODE[key] = _i
 
+# GFA-BASIC uses a DIFFERENT opcode for the numeric and string forms of
+# '+' (concatenation) and every comparison operator, even though both
+# read identically in source -- GFAPFT lists each of these texts twice
+# (e.g. '+' at both 6 and 28), and PFT_TEXT_TO_CODE's own "first
+# occurrence wins" dedup above always keeps the lower (numeric) index.
+# That silently made every STRING '+'/comparison wrong until now.
+#
+# Confirmed via a real GFA-BASIC -s debug compile: 'c$=a$+b$+g$'
+# tokenized with the numeric '+' (code 6, PFT_TEXT_TO_CODE's default)
+# failed to load in the real editor (error 65535), while an otherwise
+# byte-identical hand-typed program (using the real editor's own
+# tokenizer) used code 28 instead. The eight comparison operators show
+# the exact same "listed twice, 8 slots apart" shape in GFAPFT (12-19
+# numeric, 20-27 string) -- included here by structural symmetry with
+# the confirmed '+' pair, not yet independently Level-4 confirmed the
+# way '+' itself now is (see the companion GFA Decompiler project's
+# test.md for the verification-level convention). If a future compile
+# ever shows a string comparison behaving differently, re-check this
+# table first.
+AMBIGUOUS_OP_CODES: dict[str, tuple[int, int]] = {
+    "+": (6, 28),
+    "<>": (12, 20),
+    "<=": (13, 21),
+    "=<": (14, 22),
+    ">=": (15, 23),
+    "=>": (16, 24),
+    "<": (17, 25),
+    ">": (18, 26),
+    "=": (19, 27),
+}
+
+# GFAVST type indices whose values are strings (scalar '$' and string
+# array '$(') -- used to track whether the operand immediately before
+# an ambiguous operator was string-typed. Index 15 (GFAVST's other '$'
+# entry) is deliberately excluded: SUFFIX_TO_TYPE's own first-occurrence
+# dedup means a plain '$' suffix always resolves to type 1, so 15 is
+# never actually returned by parse_var_ref.
+STRING_VST_TYPES = {1, 5}
+
+# LEFT$(/RIGHT$( also each list two PFT codes for the identical display
+# text (58/59, 60/61) -- unlike '+'/the comparisons above, this isn't a
+# numeric-vs-string distinction (both codes are for the same read-only
+# string-returning function). Confirmed via a real GFA-BASIC -s debug
+# compile (RTLIBTS2): 'd$=LEFT$(c$,3)' compiles to code 59 (0x3b), never
+# PFT_TEXT_TO_CODE's default (58, the first/lower occurrence found by
+# its dedup) -- and 'h$=RIGHT$(c$,3)' likewise uses 61, not 60. What
+# triggers the OTHER member of each pair isn't known yet (not exercised
+# by any test program so far) -- MID$( has the identical duplicate
+# shape (62/63) but is deliberately left alone here since there's no
+# ground truth yet for which of its two codes a plain read use needs.
+PFT_CODE_OVERRIDE: dict[str, int] = {
+    "LEFT$(": 59,
+    "RIGHT$(": 61,
+}
+
+# Full inventory of every OTHER GFAPFT display-text collision, found by
+# scanning the whole table after the '+'/comparison/LEFT$/RIGHT$ bugs
+# above turned out to all share the same root cause (PFT_TEXT_TO_CODE's
+# first-occurrence dedup silently picking one of several real, distinct
+# opcodes that happen to render the same text). None of these are fixed
+# yet -- there's no ground truth for what triggers the second (or
+# third) member of each pair/triple, the way a real -s debug compile
+# gave us for the ones above -- but they're the same shape of risk and
+# should be the first place to look if a generated .gfa using any of
+# these ever fails to load again:
+#   '-' at 5, 30 (possibly binary vs. unary minus)
+#   ')' at 32, 51 -- '(' at 35, 157 -- ',' at 33, 156 (plain punctuation!)
+#   '=' at 19, 27, 69 (a third '=' beyond the numeric/string comparison pair)
+#   'AT(' at 89, 122; 'INPUT$(' at 94, 95; 'ROUND(' at 112, 113
+#   'BIN$(' at 115, 116; 'MIN(' at 117, 118; 'MAX(' at 119, 120
+#   'STRING$(' at 129, 130; 'STR$(' at 190, 191, 192 (three-way!)
+#   'HEX$(' at 193, 194; 'OCT$(' at 195, 196
+# All of these currently fall through to PFT_TEXT_TO_CODE's plain
+# first-occurrence default. Both of this project's own real -s test
+# programs (RTLIBTST, RTLIBTS2) exercise plain '(' /')'/',' constantly
+# and matched a real hand-typed compile byte-for-byte using that
+# default, so the lower code is at least correct for ordinary
+# function-call/grouping use -- whatever triggers the alternate code
+# for these remains unknown.
+
 SFT_TEXT_TO_CODE: dict[str, int] = {}
 for _i, _name in enumerate(GFASFT):
     key = _norm(_name)
@@ -297,6 +377,25 @@ def _try_match_keyword(text: str, pos: int, table: dict[str, int], max_len: int)
 
 def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False) -> bytes:
     out = bytearray()
+    # Tracks whether the most recently emitted atom (literal, var-ref, or
+    # builtin-function call) was string-typed -- used to pick the right
+    # code for an ambiguous operator ('+' or a comparison, see
+    # AMBIGUOUS_OP_CODES) immediately after it. Not reset by punctuation
+    # (',', '(', ')') so a parenthesized/argument-list boundary doesn't
+    # lose track of the enclosing expression's own type.
+    last_was_string = False
+    # Which filler-byte VALUE the next odd+filler numeric literal (see
+    # array_open below) should use -- True for a plain 0x00, False for
+    # the pair's own even code instead. Defaults True to match every
+    # existing array_open=True caller (ARRAY_ASSIGN_LCP's index,
+    # FOR's start value), both genuinely array/dimension-index-shaped
+    # literals like DIM's own confirmed 0x00 case. Only the new
+    # comma-after-a-string-argument trigger below (LEFT$(c$,3)'s "3")
+    # sets this False, confirmed via RTLIBTS2's own 'c9 c8' bytes ('LET
+    # i%=1' and hex/octal/binary literals reuse the even code too, per
+    # the odd/filler branch's own docstring, but aren't re-armed through
+    # this array_open mechanism at all, so they don't need tracking here).
+    zero_filler = True
     # Set right after emitting an array-reference token ('name(' --
     # already includes the '(' as part of its sigil, see resolve_var);
     # consumed (and cleared) by the very next numeric literal, which
@@ -326,6 +425,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         # token automatically, and re-armed only by the var-ref branch
         # further down when it just emitted a fresh array-reference.
         was_array_open, array_open = array_open, False
+        was_zero_filler, zero_filler = zero_filler, True
         if c == " ":
             pos += 1
             continue
@@ -339,6 +439,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             out.append(len(raw))
             out += raw
             pos = close + 1
+            last_was_string = True
             continue
         num = parse_number(text, pos)
         if num is not None:
@@ -366,25 +467,25 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 # Confirmed against the real compiler's own bundled test
                 # archive (gb36test_archive/default.gfa): 'DIM a$(5)'
                 # uses a zero filler byte ('c9 00 00000005'), while 'LET
-                # i%=1' and the &H/&O/&X literal forms happen to reuse
-                # each pair's own even code as filler instead ('c9 c8
-                # 00000001', 'cb ca ...', etc.) -- different values,
-                # same structural shape, confirming the filler's value
-                # truly doesn't matter and 0x00 is a safe, simple choice.
-                # The even code alone (this function's previous,
-                # un-filler'd output) decodes fine through this project's
-                # own lenient detokenizer -- which is exactly why round-
-                # tripping through this project's own tokenizer/
-                # detokenizer pair never caught the real compiler
-                # rejecting it -- but the real editor doesn't accept
-                # files missing that filler byte, on any literal,
-                # anywhere: this bug affected every numeric literal this
-                # tool has ever produced, not just array indices.
+                # i%=1' and the &H/&O/&X literal forms use each pair's
+                # own even code as filler instead ('c9 c8 00000001', 'cb
+                # ca ...', etc.). The filler's value truly doesn't matter
+                # to THIS tool's own decoder (the real one's own
+                # unconditional 'pos += 1' skip never reads it back
+                # either) -- but the real editor's LOAD validation is
+                # strict about matching its own tokenizer byte-for-byte,
+                # so getting the VALUE right matters for that, even
+                # though it's functionally inert. zero_filler (see its
+                # own docstring above) tracks which of the two a given
+                # odd+filler trigger needs -- confirmed a second time via
+                # RTLIBTS2's own 'LEFT$(c$,3)'/'RIGHT$(c$,3)' count
+                # argument, which needs the even-code form, not 0x00.
                 even = {10: 200, 16: 202, 8: 204, 2: 206}[base]
                 out.append(even + 1)
-                out.append(0)
+                out.append(0 if was_zero_filler else even)
                 push32(out, int(value))
             pos = newpos
+            last_was_string = False
             continue
         # Try a variable/array reference AND both keyword tables, then take
         # whichever match consumes the MOST text, with keywords winning a
@@ -409,18 +510,59 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             pass
         elif kw_len == best:
             code, newpos = kw
-            out.append(code)
+            matched = text[pos:newpos]
+            op_key = matched.upper() if matched[:1].isalpha() else matched
+            if op_key in AMBIGUOUS_OP_CODES:
+                # See AMBIGUOUS_OP_CODES' own comment: pick the numeric
+                # or string-typed opcode based on what the operand right
+                # before this operator was, instead of PFT_TEXT_TO_CODE's
+                # fixed (always-numeric) choice.
+                num_code, str_code = AMBIGUOUS_OP_CODES[op_key]
+                out.append(str_code if last_was_string else num_code)
+            else:
+                out.append(PFT_CODE_OVERRIDE.get(matched.upper(), code))
+                if matched[:1].isalpha():
+                    # Any other keyword match (a builtin function call,
+                    # AND/OR/MOD/DIV/NOT, etc.) -- string-typed only if
+                    # its own text ends in '$' (LEFT$(/DATE$/TIME$/...),
+                    # matching the real editor's own suffix convention
+                    # for string-returning builtins; everything else
+                    # (INSTR(/LEN(/ASC(/AND/...) returns numeric.
+                    last_was_string = matched.rstrip("(").endswith("$")
+                elif matched == "," and last_was_string:
+                    # Re-arm the odd+filler literal form (see array_open's
+                    # own docstring above) for the numeric argument right
+                    # after this comma -- confirmed via RTLIBTS2's own
+                    # 'LEFT$(c$,3)'/'RIGHT$(c$,3)': the count argument
+                    # needs the odd+filler form same as an array index
+                    # does, but only because the PRECEDING argument was
+                    # string-typed. Doesn't fire for DIM's own multi-
+                    # dimension commas ('DIM var$(16,1024)') since those
+                    # sit between two NUMERIC dimension sizes -- already
+                    # confirmed ground truth that only the first one gets
+                    # the odd form there (see tokenize_expr's own opening
+                    # docstring) -- so gating on last_was_string here
+                    # keeps that case untouched.
+                    array_open = True
+                    zero_filler = False
+                # Any other punctuation ('(', ')', ';', etc.) leaves
+                # last_was_string untouched -- an argument/paren boundary
+                # shouldn't lose track of the enclosing expression's own
+                # type.
             pos = newpos
             continue
         elif sft_len == best:
             code, newpos = sft
             out.append(208)
             out.append(code)
+            matched = text[pos:newpos]
+            last_was_string = matched.rstrip("(").upper().endswith("$")
             pos = newpos
             continue
         else:
             type_, name, is_array, newpos = varref
             idx = pool.get_or_add(type_, name)
+            last_was_string = type_ in STRING_VST_TYPES
             # Real GFA-BASIC uses the byte-sized var-index form
             # (pft 224-239) whenever the pool index fits in a byte,
             # falling back to the word-sized form (240-255, this
@@ -440,6 +582,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             pos = newpos
             if is_array:
                 array_open = True
+                zero_filler = True
             continue
         # Last resort: a bare identifier with no sigil and no keyword
         # match is a LABEL reference (GOTO/GOSUB/ON...GOTO targets --
@@ -1226,9 +1369,18 @@ def _append_comment(out: bytearray, comment: tuple[int, str] | None) -> None:
         # bug, not a style choice (round-tripping through this project's
         # own tokenizer/detokenizer pair never caught it, since the
         # detokenizer never required the byte it was missing).
+        #
+        # The pad byte's own VALUE is 70 again (repeating the sentinel),
+        # not a zero byte -- that first 8-line test program never
+        # happened to exercise a line needing this pad at all, so the
+        # zero-byte guess went unverified until a real GFA-BASIC -s
+        # debug compile of 'c$=a$+b$+g$'/'i$=TRIM$(...)'/three PRINT
+        # statements (RTLIBTS2) showed the real editor's own tokenizer
+        # emitting a second 70 byte in every line needing a pad, never
+        # a zero. Fixed: pad with another sentinel byte, not zero.
         out.append(70)
         if len(out) & 1:
-            out.append(0)
+            out.append(70)
         return
     n, ctext = comment
     out.append(70)
