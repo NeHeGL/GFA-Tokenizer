@@ -155,7 +155,26 @@ PFT_CODE_OVERRIDE: dict[str, int] = {
 # gave us for the ones above -- but they're the same shape of risk and
 # should be the first place to look if a generated .gfa using any of
 # these ever fails to load again:
-#   '-' at 5, 30 (possibly binary vs. unary minus)
+#   '-' at 5 (binary) vs 30 (unary) -- CONFIRMED via real ground truth
+#     already in this repo (gb36test_archive/hell.gfa's own compiled
+#     bytes for 'UNTIL token&=-1'/'UNTIL z&=-1', not a guess): unary
+#     minus isn't just a different opcode, it's a DIFFERENT ENCODING
+#     for its operand too. 'token&=-1' compiles to [...=19][30=0x1e]
+#     [0xdd][0x80][8-byte packed float encoding +1.0, decodable with
+#     this file's own gfa_float_to_double] -- i.e. the operand is
+#     stored as its ABSOLUTE VALUE in a packed-float form (pft 221, not
+#     219's plain packed-float or the 200-207 integer forms), and the
+#     0x1e opcode supplies the negation. double_to_gfa_float(1.0)'s own
+#     8-byte output ('00 00 00 00 00 00 03 ff') matches bytes 2-9 of
+#     that blob exactly except a 0x80 vs 0x00 first byte -- likely a
+#     sign/exponent flag this project's own encoder never sets, not yet
+#     understood. NOT fixed: this is a bigger, separate feature (a
+#     unary-minus code path with its own literal-encoding rules) than a
+#     simple opcode swap, and only 2 examples (both integer -1) are
+#     confirmed -- not enough to know if non-literal operands or
+#     non-int values behave the same way. Flagging clearly rather than
+#     guessing further; see the companion GFA Decompiler project's
+#     memory (project_gfa_pft_duplicate_codes) for the investigation.
 #   ')' at 32, 51 -- '(' at 35, 157 -- ',' at 33, 156 (plain punctuation!)
 #   '=' at 19, 27, 69 (a third '=' beyond the numeric/string comparison pair)
 #   'AT(' at 89, 122; 'INPUT$(' at 94, 95; 'ROUND(' at 112, 113
