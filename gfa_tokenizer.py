@@ -676,7 +676,19 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     pending_unary_minus = True
                     pos = newpos
                 else:
-                    out.append(200)  # plain decimal 0
+                    # This injected '0' is a real literal token in its
+                    # own right, subject to the same odd+filler-vs-plain
+                    # choice as any other (see was_first_token's own
+                    # docstring) -- it was hardcoded to the plain form
+                    # here, which is wrong whenever this '0' is the
+                    # expression's first token (e.g. 'z%=-x%' -> '0-x%'
+                    # at the very start of the RHS -- confirmed needing
+                    # odd+filler, same as 'z%=0-x%' typed directly).
+                    if was_first_token:
+                        out.append(201)
+                        out.append(200)
+                    else:
+                        out.append(200)
                     push32(out, 0)
                     out.append(5)  # binary minus
                     just_saw_value = True
