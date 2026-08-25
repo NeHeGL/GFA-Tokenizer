@@ -449,8 +449,15 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         if wm:
             label_name = wm.group(0)
             idx = pool.get_or_add(10, label_name)
-            out.append(240 + 10)
-            push16(out, idx)
+            # Same byte-form-when-it-fits choice as the array/variable
+            # var-ref case above -- confirmed needed here too against a
+            # real GFA-BASIC editor's own tokenized 'RESTORE lbl'.
+            if idx < 256:
+                out.append(224 + 10)
+                out.append(idx)
+            else:
+                out.append(240 + 10)
+                push16(out, idx)
             pos = wm.end()
             continue
         raise GfaTokenizeError(f"can't tokenize {text[pos:pos+20]!r} at column {pos}")
@@ -898,8 +905,15 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         # after this line as opaque binary, not further statements).
         idx = pool.get_or_add(10, m.group(1))
         push16(out, 252)
-        out.append(240 + 10)
-        push16(out, idx)
+        # Same byte-form-when-it-fits choice as the label-reference case
+        # in tokenize_expr -- confirmed needed here too against a real
+        # GFA-BASIC editor's own tokenized 'lbl:' declaration.
+        if idx < 256:
+            out.append(224 + 10)
+            out.append(idx)
+        else:
+            out.append(240 + 10)
+            push16(out, idx)
         out.append(PFT_TEXT_TO_CODE[":"])
         _append_comment(out, comment)
         return bytes(out)
@@ -961,7 +975,15 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             idx = pool.get_or_add(type_, name)
             push16(out, lcp)
             push16(out, idx)
-            out += tokenize_expr(start_expr, 0, len(start_expr), pool)
+            # array_open=True: the start value is the first literal
+            # right after a header that (like ARRAY_ASSIGN_LCP) encodes
+            # its own variable directly with no var-ref token of its
+            # own -- needs the odd/filler literal form for the same
+            # reason an array's first index does. Confirmed against a
+            # real GFA-BASIC editor's own tokenized 'FOR i%=1 TO 3': the
+            # start value (1) uses the odd form, the TO value (3) doesn't
+            # -- so only start_expr is seeded, not to_expr/step_expr.
+            out += tokenize_expr(start_expr, 0, len(start_expr), pool, array_open=True)
             out.append(PFT_TEXT_TO_CODE["TO"])
             out += tokenize_expr(to_expr, 0, len(to_expr), pool)
             if step_expr is not None:
@@ -1322,20 +1344,25 @@ def tokenize_source(text: str) -> bytes:
     #                 same value as sep[35] (i.e. "zero extra") -- always
     #                 wrong, and load-bombing the real editor on any
     #                 program actually using its declared variables
-    #                 (confirmed against a Hatari-compiled test program in
+    #                 (confirmed against Hatari-compiled test programs in
     #                 the companion GFA Decompiler project). Sized here
     #                 per GFAVST type index using each GFA-BASIC scalar
     #                 type's own real runtime size (REAL=8, STRING
-    #                 descriptor=6, INTEGER=2, LONG=4, BYTE=1) and the same
-    #                 6-byte descriptor size for every array type still
-    #                 (confirmed for STRING scalars/arrays specifically;
-    #                 the sizes for other scalar/array types are
-    #                 documentation-derived, not yet independently
-    #                 ground-truth-confirmed the way STRING's is).
-    #                 PROCEDURE/FUNCTION/label names (indices 10/11/14)
-    #                 aren't variables and contribute nothing.
+    #                 descriptor=6, INTEGER=4 -- not the 2-byte value
+    #                 width, apparently padded to a 4-byte cell at rest;
+    #                 confirmed by a real 'FOR i%=1 TO 3' test whose
+    #                 sep[36] was exactly 2 higher than this table's first,
+    #                 2-byte-assuming version predicted -- LONG=4, BYTE=1)
+    #                 and the same 6-byte descriptor size for every array
+    #                 type still (confirmed for STRING scalars/arrays
+    #                 specifically; the sizes for other scalar/array types
+    #                 are documentation-derived, not yet independently
+    #                 ground-truth-confirmed the way STRING's and
+    #                 INTEGER's are). PROCEDURE/FUNCTION/label names
+    #                 (indices 10/11/14) aren't variables and contribute
+    #                 nothing.
     TRAILING_STORAGE_SIZE = {
-        0: 8, 1: 6, 2: 2, 3: 4, 4: 6, 5: 6, 6: 6, 7: 6,
+        0: 8, 1: 6, 2: 4, 3: 4, 4: 6, 5: 6, 6: 6, 7: 6,
         8: 4, 9: 1, 12: 6, 13: 6, 15: 6,
     }
     trailing_extra = sum(
