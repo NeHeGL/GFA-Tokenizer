@@ -584,12 +584,36 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             if op_key == "-" and not just_saw_value:
                 # Unary minus (nothing value-shaped precedes it: start of
                 # the expression, or right after another operator/'('/
-                # ',') -- opcode 30, not 5 (binary), and its operand gets
-                # a different encoding entirely, see pending_unary_minus'
-                # own docstring above.
-                out.append(30)
-                pending_unary_minus = True
-                pos = newpos
+                # ','). Opcode 30's packed-float operand encoding (see
+                # pending_unary_minus' own docstring) is confirmed ONLY
+                # for an immediately-following plain INTEGER literal
+                # ('z%=-1') -- a first version of this fix applied it to
+                # ANY unary '-' (variable operands like '-x%', float
+                # literals like '-3.5' too) and the real editor rejected
+                # both of those ("3 bombs" on load/compile, confirmed by
+                # the user against UNARYTST.GFA). For anything else,
+                # rewrite as '0 - operand' instead: a plain 0 literal
+                # (already-confirmed encoding) plus the already-confirmed
+                # BINARY minus, letting the operand tokenize completely
+                # normally right after -- semantically identical, and
+                # doesn't require guessing at another unconfirmed byte
+                # shape the way extending the packed-float trick would.
+                peek = parse_number(text, newpos)
+                if peek is not None and not peek[1] and peek[3] == 10:
+                    # Confirmed only for a plain base-10 integer literal
+                    # ('z%=-1') -- &H/&O/&X literals fall through to the
+                    # '0 - operand' rewrite below, same as float/variable/
+                    # function-call operands, since there's no evidence
+                    # either way for those bases specifically.
+                    out.append(30)
+                    pending_unary_minus = True
+                    pos = newpos
+                else:
+                    out.append(200)  # plain decimal 0
+                    push32(out, 0)
+                    out.append(5)  # binary minus
+                    just_saw_value = True
+                    pos = newpos
                 continue
             if op_key in AMBIGUOUS_OP_CODES:
                 # See AMBIGUOUS_OP_CODES' own comment: pick the numeric
