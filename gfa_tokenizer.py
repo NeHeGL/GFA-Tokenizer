@@ -495,26 +495,34 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         num = parse_number(text, pos)
         if num is not None:
             value, is_float, newpos, base = num
-            if was_pending_unary_minus:
-                # See pending_unary_minus' own docstring above: a literal
-                # right after a unary minus is encoded as a packed float
-                # of its absolute value, not this literal's normal form --
-                # with TWO differences from a plain pft-219 packed float:
-                # an extra 0x80 marker byte right after the pft byte, and
-                # the float payload's own first byte has its top bit set
-                # (e.g. double_to_gfa_float(1.0)'s '00 00 00 00 00 00 03
-                # ff' becomes '80 00 00 00 00 00 03 ff' here). Both still
-                # unexplained structurally, but exactly what
-                # gb36test_archive/hell.gfa's own 'token&=-1'/'z&=-1'
-                # bytes show.
+            if was_pending_unary_minus or is_float:
+                # pft 219 (a plain packed float with no sign byte) is
+                # NEVER actually used by the real compiler for a bare
+                # literal -- confirmed 2026-08-25 via TESTVEX.GFA, a real
+                # hand-typed-and-compiled 'v!=3.5' (no unary minus at
+                # all), whose bytes are '[opcode 221][marker 0x00][8-byte
+                # packed float, first byte OR'd with 0x80]', not
+                # '[opcode 219][plain packed float]' the way this file
+                # used to encode it. So EVERY float literal -- negated or
+                # not -- uses pft 221: the payload is always the packed
+                # float of the ABSOLUTE value with its own first byte's
+                # top bit forced set, preceded by one marker byte that's
+                # 0x80 when a unary minus produced this literal (the
+                # value's actual sign) and 0x00 otherwise. A plain
+                # (non-float) integer right after a unary minus
+                # (confirmed only via gb36test_archive/hell.gfa's own
+                # 'token&=-1'/'z&=-1') reuses this exact same shape too
+                # (marker 0x80, packed float of the integer's absolute
+                # value) -- unary-minus + a non-float, non-base-10-
+                # integer literal (hex/octal/binary) has no ground truth
+                # either way yet, so that case still falls through to the
+                # separate '0 - operand' rewrite below instead of
+                # guessing at this shape for it too.
                 float_bytes = bytearray(double_to_gfa_float(abs(value)))
                 float_bytes[0] |= 0x80
                 out.append(221)
-                out.append(0x80)
+                out.append(0x80 if was_pending_unary_minus else 0x00)
                 out += float_bytes
-            elif is_float:
-                out.append(219)  # packed float, decimal display
-                out += double_to_gfa_float(value)
             elif not was_array_open:
                 # Plain form: no filler byte. Used for every numeric
                 # literal except the first one right after an array
@@ -1409,7 +1417,19 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             out += b"\x00\x00\x00\x00"
         rest = body[rest_start:]
         if rest.strip():
-            out += tokenize_expr(rest, 0, len(rest), pool)
+            if lcp in PRINT_LCPS:
+                # See PRINT_LCPS' own comment: each non-string-typed
+                # print item needs an extra invisible marker byte (pft
+                # 55) right before it.
+                for chunk in _split_print_items(rest):
+                    if chunk in (",", ";"):
+                        out += tokenize_expr(chunk, 0, len(chunk), pool)
+                    elif chunk.strip():
+                        if not _expr_starts_string(chunk):
+                            out.append(55)
+                        out += tokenize_expr(chunk, 0, len(chunk), pool)
+            else:
+                out += tokenize_expr(rest, 0, len(rest), pool)
         _append_comment(out, comment)
         return bytes(out)
 
@@ -1541,6 +1561,80 @@ _SIMPLE_KEYWORDS = {
     "DO WHILE": 196, "DO UNTIL": 200, "LOOP WHILE": 204, "LOOP UNTIL": 208,
     "ELSE IF": 64,
 }
+
+
+# lcp values for PRINT/LPRINT -- the only statements confirmed so far to
+# need an extra invisible marker byte (GFAPFT opcode 55, whose own display
+# text is '' -- never rendered as source, just a structural tag) right
+# before any print-item whose expression is NOT string-typed. Confirmed
+# 2026-08-25 via TESTVEX.GFA, a real hand-typed-and-compiled 'PRINT v!'
+# (a bare single-precision variable): its bytes are '[lcp][opcode 55]
+# [var-ref]', not '[lcp][var-ref]' the way this project previously
+# encoded every PRINT item uniformly (confirmed correct only for STRING
+# arguments so far, e.g. RTLIBTJ2's own 'PRINT h$'/'PRINT e$'/etc.).
+# Applied to every non-string top-level item, not just SINGLE
+# specifically -- there's no reason GFA-BASIC's own PRINT routine would
+# special-case one non-string type over another here, but this
+# generalization (INTEGER, REAL, LONG, etc. also needing it) is still
+# pending its own direct confirmation.
+PRINT_LCPS = {588, 1212}
+
+
+def _split_print_items(text: str) -> list[str]:
+    """Splits a PRINT/LPRINT argument list at top-level ','/';' separators
+    (outside quotes and parens), returning items and separators
+    interleaved (separators as their own single-character elements).
+    """
+    items: list[str] = []
+    depth = 0
+    in_quote = False
+    start = 0
+    for i, c in enumerate(text):
+        if in_quote:
+            if c == '"':
+                in_quote = False
+        elif c == '"':
+            in_quote = True
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif depth == 0 and c in ",;":
+            items.append(text[start:i])
+            items.append(c)
+            start = i + 1
+    items.append(text[start:])
+    return items
+
+
+def _expr_starts_string(text: str) -> bool:
+    """Best-effort check of whether an expression's leading atom is
+    string-typed -- used only to decide PRINT's own marker byte (see
+    PRINT_LCPS' own comment above), not general type inference.
+    """
+    s = text.lstrip()
+    if not s:
+        return False
+    if s[0] == '"':
+        return True
+    if parse_number(s, 0) is not None:
+        return False
+    varref = parse_var_ref(s, 0)
+    kw = _try_match_keyword(s, 0, PFT_TEXT_TO_CODE, _MAX_PFT_WORD_LEN)
+    sft = _try_match_keyword(s, 0, SFT_TEXT_TO_CODE, _MAX_SFT_WORD_LEN)
+    var_len = varref[3] if varref is not None else -1
+    kw_len = kw[1] if kw is not None else -1
+    sft_len = sft[1] if sft is not None else -1
+    best = max(var_len, kw_len, sft_len)
+    if best == -1:
+        return False
+    if kw_len == best:
+        matched = s[:kw_len]
+        return matched[:1].isalpha() and matched.rstrip("(").upper().endswith("$")
+    if sft_len == best:
+        matched = s[:sft_len]
+        return matched.rstrip("(").upper().endswith("$")
+    return varref[0] in STRING_VST_TYPES
 
 
 def _match_leading_keyword(body: str) -> tuple[int, int] | None:
