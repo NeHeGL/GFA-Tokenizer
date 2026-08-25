@@ -652,6 +652,11 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     push32(out, 0)
                     out.append(5)  # binary minus
                     just_saw_value = True
+                    # This rewrite ends in a real binary minus (opcode
+                    # 5), same as any other -- so a literal right after
+                    # it (e.g. the '3.5' in 'v!=-3.5' -> '0-3.5') needs
+                    # the same pft-223 treatment as 'y%=x%-1''s '1' does.
+                    just_saw_binary_arith_op = True
                     pos = newpos
                 continue
             if op_key in AMBIGUOUS_OP_CODES:
