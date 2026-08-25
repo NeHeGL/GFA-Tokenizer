@@ -461,6 +461,16 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # GFA would special-case the operator symbol here) pending their own
     # direct confirmation.
     just_saw_binary_arith_op = False
+    # True once any real (non-whitespace) token has been consumed --
+    # used only to tell whether a literal is the very FIRST token of this
+    # tokenize_expr call (see the odd+filler-vs-plain literal choice
+    # below). Confirmed 2026-08-25 via 'z%=0-x%' (the safe rewrite for
+    # 'z%=-x%'): the leading '0' -- the first token of the RHS expression,
+    # but not the entire RHS by itself (so the bare-assignment shortcut
+    # above doesn't intercept it) -- needs the same odd+filler form as a
+    # bare 'x%=5' does, not the plain form this project previously
+    # defaulted every non-array-context literal to.
+    seen_any_token = False
     # Set right after emitting an array-reference token ('name(' --
     # already includes the '(' as part of its sigil, see resolve_var);
     # consumed (and cleared) by the very next numeric literal, which
@@ -496,6 +506,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         if c == " ":
             pos += 1
             continue
+        was_first_token, seen_any_token = not seen_any_token, True
         if c == '"':
             close = text.find('"', pos + 1)
             if close == -1:
@@ -554,11 +565,28 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 out.append(221)
                 out.append(0x80 if was_pending_unary_minus else 0x00)
                 out += float_bytes
+            elif was_first_token and not was_array_open:
+                # The very first token of this tokenize_expr call, but
+                # NOT the entire expression by itself (a bare 'x%=5'
+                # takes the separate _try_bare_int_literal_rhs shortcut
+                # above tokenize_expr entirely and never reaches here) --
+                # e.g. the leading '0' in the '0 - operand' rewrite's
+                # '0-x%'. Confirmed 2026-08-25 via 'z%=0-x%': needs the
+                # same odd+filler form (own even code as filler) as a
+                # bare whole-RHS literal does, not the plain form used
+                # for a later literal in the same list/call (see
+                # was_array_open's own comment below).
+                even = {10: 200, 16: 202, 8: 204, 2: 206}[base]
+                out.append(even + 1)
+                out.append(even)
+                push32(out, int(value))
             elif not was_array_open:
                 # Plain form: no filler byte. Used for every numeric
                 # literal except the first one right after an array
                 # reference opens (see was_array_open's own comment
-                # above and the odd/filler branch just below).
+                # above and the odd/filler branch just below), and
+                # except the very first token of the whole expression
+                # (see was_first_token's own branch just above).
                 out.append({10: 200, 16: 202, 8: 204, 2: 206}[base])
                 push32(out, int(value))
             else:
