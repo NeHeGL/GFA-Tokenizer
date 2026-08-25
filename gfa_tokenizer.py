@@ -129,6 +129,13 @@ AMBIGUOUS_OP_CODES: dict[str, tuple[int, int]] = {
 # never actually returned by parse_var_ref.
 STRING_VST_TYPES = {1, 5}
 
+# Word-shaped operators that DON'T produce a value themselves -- used so
+# a '-' right after one of these (e.g. 'a AND -b') is still recognized
+# as unary, not binary. Every other alphabetic keyword match (a builtin
+# function call, a bare constant like 'PI', etc.) is assumed to produce
+# a value.
+WORD_OPERATORS = {"AND", "OR", "XOR", "IMP", "EQV", "MOD", "DIV", "NOT"}
+
 # LEFT$(/RIGHT$( also each list two PFT codes for the identical display
 # text (58/59, 60/61) -- unlike '+'/the comparisons above, this isn't a
 # numeric-vs-string distinction (both codes are for the same read-only
@@ -415,6 +422,29 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # the odd/filler branch's own docstring, but aren't re-armed through
     # this array_open mechanism at all, so they don't need tracking here).
     zero_filler = True
+    # True right after any value-producing atom (string/numeric literal,
+    # var-ref, function call, or a closing ')' or '$'-suffixed builtin) --
+    # False right after an operator, '(', ',', or at the very start.
+    # Used only to tell a unary '-' (e.g. 'z%=-1', '-x%') apart from a
+    # binary one (e.g. 'x%-1') -- GFA-BASIC uses a different opcode (30,
+    # not 5) and a different operand encoding for the unary form, see
+    # pending_unary_minus below.
+    just_saw_value = False
+    # Set for exactly one iteration right after emitting a unary minus
+    # (opcode 30, see the '-' handling below): the very next numeric
+    # literal -- of ANY type, integer or float -- gets encoded as a
+    # packed float (pft 221) holding its ABSOLUTE value, immediately
+    # preceded by one extra byte (0x80, meaning not yet understood) --
+    # completely different from this literal's normal encoding (the
+    # 200-207 integer forms, or 219's plain packed float). Confirmed via
+    # gb36test_archive/hell.gfa's own 'token&=-1'/'z&=-1': both compile
+    # to '[opcode 30][0xdd][0x80][8-byte packed float of +1.0]', where
+    # the trailing 8 bytes match this file's own double_to_gfa_float(1.0)
+    # exactly. Only integer '-1' is confirmed this way -- applying the
+    # same shape to a unary-minus float literal too is this project's
+    # best guess pending a real compile to confirm it, not itself
+    # independently ground-truth-checked yet.
+    pending_unary_minus = False
     # Set right after emitting an array-reference token ('name(' --
     # already includes the '(' as part of its sigil, see resolve_var);
     # consumed (and cleared) by the very next numeric literal, which
@@ -445,6 +475,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         # further down when it just emitted a fresh array-reference.
         was_array_open, array_open = array_open, False
         was_zero_filler, zero_filler = zero_filler, True
+        was_pending_unary_minus, pending_unary_minus = pending_unary_minus, False
         if c == " ":
             pos += 1
             continue
@@ -459,11 +490,29 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             out += raw
             pos = close + 1
             last_was_string = True
+            just_saw_value = True
             continue
         num = parse_number(text, pos)
         if num is not None:
             value, is_float, newpos, base = num
-            if is_float:
+            if was_pending_unary_minus:
+                # See pending_unary_minus' own docstring above: a literal
+                # right after a unary minus is encoded as a packed float
+                # of its absolute value, not this literal's normal form --
+                # with TWO differences from a plain pft-219 packed float:
+                # an extra 0x80 marker byte right after the pft byte, and
+                # the float payload's own first byte has its top bit set
+                # (e.g. double_to_gfa_float(1.0)'s '00 00 00 00 00 00 03
+                # ff' becomes '80 00 00 00 00 00 03 ff' here). Both still
+                # unexplained structurally, but exactly what
+                # gb36test_archive/hell.gfa's own 'token&=-1'/'z&=-1'
+                # bytes show.
+                float_bytes = bytearray(double_to_gfa_float(abs(value)))
+                float_bytes[0] |= 0x80
+                out.append(221)
+                out.append(0x80)
+                out += float_bytes
+            elif is_float:
                 out.append(219)  # packed float, decimal display
                 out += double_to_gfa_float(value)
             elif not was_array_open:
@@ -505,6 +554,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 push32(out, int(value))
             pos = newpos
             last_was_string = False
+            just_saw_value = True
             continue
         # Try a variable/array reference AND both keyword tables, then take
         # whichever match consumes the MOST text, with keywords winning a
@@ -531,6 +581,16 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             code, newpos = kw
             matched = text[pos:newpos]
             op_key = matched.upper() if matched[:1].isalpha() else matched
+            if op_key == "-" and not just_saw_value:
+                # Unary minus (nothing value-shaped precedes it: start of
+                # the expression, or right after another operator/'('/
+                # ',') -- opcode 30, not 5 (binary), and its operand gets
+                # a different encoding entirely, see pending_unary_minus'
+                # own docstring above.
+                out.append(30)
+                pending_unary_minus = True
+                pos = newpos
+                continue
             if op_key in AMBIGUOUS_OP_CODES:
                 # See AMBIGUOUS_OP_CODES' own comment: pick the numeric
                 # or string-typed opcode based on what the operand right
@@ -538,6 +598,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 # fixed (always-numeric) choice.
                 num_code, str_code = AMBIGUOUS_OP_CODES[op_key]
                 out.append(str_code if last_was_string else num_code)
+                just_saw_value = False
             else:
                 out.append(PFT_CODE_OVERRIDE.get(matched.upper(), code))
                 if matched[:1].isalpha():
@@ -546,8 +607,12 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # its own text ends in '$' (LEFT$(/DATE$/TIME$/...),
                     # matching the real editor's own suffix convention
                     # for string-returning builtins; everything else
-                    # (INSTR(/LEN(/ASC(/AND/...) returns numeric.
+                    # (INSTR(/LEN(/ASC(/AND/...) returns numeric. Only a
+                    # real value-producing match (not a word operator
+                    # like AND/OR/MOD/DIV/NOT) counts as "just saw a
+                    # value" for the next '-'/unary-minus check.
                     last_was_string = matched.rstrip("(").endswith("$")
+                    just_saw_value = op_key not in WORD_OPERATORS
                 elif matched == "," and last_was_string:
                     # Re-arm the odd+filler literal form (see array_open's
                     # own docstring above) for the numeric argument right
@@ -564,10 +629,18 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # keeps that case untouched.
                     array_open = True
                     zero_filler = False
-                # Any other punctuation ('(', ')', ';', etc.) leaves
-                # last_was_string untouched -- an argument/paren boundary
-                # shouldn't lose track of the enclosing expression's own
-                # type.
+                    just_saw_value = False
+                elif matched == ")":
+                    # A closing paren completes a value (grouped
+                    # expression or function-call result) -- a '-' right
+                    # after it is binary, not unary (e.g. 'FRE(0)-1').
+                    just_saw_value = True
+                else:
+                    # Any other punctuation ('(', ';', etc.) or operator
+                    # symbol -- not a value; last_was_string untouched (an
+                    # argument/paren boundary shouldn't lose track of the
+                    # enclosing expression's own type).
+                    just_saw_value = False
             pos = newpos
             continue
         elif sft_len == best:
@@ -576,12 +649,14 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             out.append(code)
             matched = text[pos:newpos]
             last_was_string = matched.rstrip("(").upper().endswith("$")
+            just_saw_value = True
             pos = newpos
             continue
         else:
             type_, name, is_array, newpos = varref
             idx = pool.get_or_add(type_, name)
             last_was_string = type_ in STRING_VST_TYPES
+            just_saw_value = True
             # Real GFA-BASIC uses the byte-sized var-index form
             # (pft 224-239) whenever the pool index fits in a byte,
             # falling back to the word-sized form (240-255, this
