@@ -445,6 +445,22 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # best guess pending a real compile to confirm it, not itself
     # independently ground-truth-checked yet.
     pending_unary_minus = False
+    # Set for exactly one iteration right after emitting a BINARY
+    # arithmetic operator ('+', '-', '*', '/' with a real value before
+    # it -- string '+' concatenation excluded, see its own check below):
+    # the very next plain base-10 literal (integer OR float) is encoded
+    # as pft 223 -- 8 bytes (double_to_gfa_float of the value, first byte
+    # OR'd with 0x80), with NO extra marker byte -- instead of its normal
+    # form. Confirmed 2026-08-25 via a real hand-typed-and-compiled
+    # 'y%=x%-1': its '1' operand is 'df 80 00 00 00 00 00 03 ff', which is
+    # pft 223 followed by double_to_gfa_float(1.0) ('00 00 00 00 00 00 03
+    # ff') with its own first byte OR'd -- NOT the plain integer form
+    # (200/201) this project had always used for every bare literal
+    # until now. Only confirmed for '-' so far; '+'/'*'/'/' are a
+    # reasoned generalization (same runtime arithmetic stack, no reason
+    # GFA would special-case the operator symbol here) pending their own
+    # direct confirmation.
+    just_saw_binary_arith_op = False
     # Set right after emitting an array-reference token ('name(' --
     # already includes the '(' as part of its sigil, see resolve_var);
     # consumed (and cleared) by the very next numeric literal, which
@@ -476,6 +492,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         was_array_open, array_open = array_open, False
         was_zero_filler, zero_filler = zero_filler, True
         was_pending_unary_minus, pending_unary_minus = pending_unary_minus, False
+        was_binary_arith_op, just_saw_binary_arith_op = just_saw_binary_arith_op, False
         if c == " ":
             pos += 1
             continue
@@ -495,7 +512,21 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         num = parse_number(text, pos)
         if num is not None:
             value, is_float, newpos, base = num
-            if was_pending_unary_minus or is_float:
+            if was_binary_arith_op and base == 10:
+                # See just_saw_binary_arith_op's own docstring above:
+                # a plain literal (integer or float) right after a
+                # BINARY arithmetic operator uses pft 223 -- the packed
+                # float of the value with its own first byte OR'd with
+                # 0x80, and no separate marker byte at all (unlike pft
+                # 221 below, which always has one). Only base-10 is
+                # confirmed; &H/&O/&X literals in this position fall
+                # through to the older, separately-unconfirmed forms
+                # below rather than guessing at this shape for them too.
+                float_bytes = bytearray(double_to_gfa_float(value))
+                float_bytes[0] |= 0x80
+                out.append(223)
+                out += float_bytes
+            elif was_pending_unary_minus or is_float:
                 # pft 219 (a plain packed float with no sign byte) is
                 # NEVER actually used by the real compiler for a bare
                 # literal -- confirmed 2026-08-25 via TESTVEX.GFA, a real
@@ -631,6 +662,8 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 num_code, str_code = AMBIGUOUS_OP_CODES[op_key]
                 out.append(str_code if last_was_string else num_code)
                 just_saw_value = False
+                if op_key == "+" and not last_was_string:
+                    just_saw_binary_arith_op = True
             else:
                 out.append(PFT_CODE_OVERRIDE.get(matched.upper(), code))
                 if matched[:1].isalpha():
@@ -667,6 +700,13 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # expression or function-call result) -- a '-' right
                     # after it is binary, not unary (e.g. 'FRE(0)-1').
                     just_saw_value = True
+                elif matched in ("-", "*", "/"):
+                    # Binary arithmetic (this '-' already fell through
+                    # the unary-minus branch above, so just_saw_value was
+                    # True right before it -- genuinely binary). See
+                    # just_saw_binary_arith_op's own docstring above.
+                    just_saw_value = False
+                    just_saw_binary_arith_op = True
                 else:
                     # Any other punctuation ('(', ';', etc.) or operator
                     # symbol -- not a value; last_was_string untouched (an
@@ -806,32 +846,36 @@ NEXT_LCP = {0: 124, 2: 136, 8: 148, 9: 160}
 # GFALCT text, no special header beyond the keyword itself.
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])=(?!=)")
 
-_NEG_INT_RHS_RE = re.compile(r"^-(\d+)\s*$")
+_INT_RHS_RE = re.compile(r"^(-?\d+)\s*$")
 
 
-def _try_negated_int_literal_rhs(rhs: str) -> bytes | None:
-    """A bare scalar assignment whose ENTIRE right-hand side is a negated
-    base-10 integer literal ('v%=-1', nothing else on the right) encodes
-    the '-1' directly as a negative integer literal -- pft 201 (the ODD
+def _try_bare_int_literal_rhs(rhs: str) -> bytes | None:
+    """A bare scalar assignment whose ENTIRE right-hand side is a plain
+    base-10 integer literal ('v%=-1' OR 'x%=5', nothing else on the
+    right) encodes it directly as an integer literal -- pft 201 (the ODD
     code of the 200/201 decimal pair) with the pair's own EVEN code (200)
     as filler, then the value's 32-bit two's-complement bytes -- NOT via
     the opcode-30 unary-minus + packed-float mechanism confirmed
     elsewhere (e.g. inside a comparison like 'UNTIL z&=-1' in
-    gb36test_archive/hell.gfa). Confirmed 2026-08-25 via a real hand-
-    typed-and-compiled 'v%=-1': its bytes are '[201][200][FF FF FF FF]',
-    completely different from the comparison-context shape. Scoped
-    narrowly to this exact case -- a unary-minus'd integer literal
-    anywhere else (inside a larger expression, a comparison, a function
-    argument) still uses the other, separately-confirmed encoding, since
-    there's no evidence this same literal-folding happens there too.
+    gb36test_archive/hell.gfa), and NOT via plain pft 200 (no filler)
+    either, despite that being what every other bare-literal context
+    uses. Confirmed 2026-08-25 via two real hand-typed-and-compiled
+    lines in the same file (COMBOJST.GFA): 'w%=-1' -> '[201][200][FF FF
+    FF FF]' (as found in an earlier, narrower version of this function)
+    AND 'x%=5' -> '[201][200][00 00 00 05]' -- so the odd+filler form
+    turns out to apply to ANY bare integer assignment RHS, not just a
+    negated one. Scoped narrowly to this exact case -- a bare integer
+    literal anywhere else (inside a larger expression, a comparison, a
+    function argument) still uses whichever other, separately-confirmed
+    encoding applies there instead.
     """
-    m = _NEG_INT_RHS_RE.match(rhs)
+    m = _INT_RHS_RE.match(rhs)
     if not m:
         return None
     out = bytearray()
     out.append(201)
     out.append(200)
-    push32(out, -int(m.group(1)))
+    push32(out, int(m.group(1)))
     return bytes(out)
 _LABEL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*):\s*$")
 _COMMENT_RE = re.compile(r"^\s*(!|REM\b)\s?(.*)$", re.IGNORECASE)
@@ -1419,8 +1463,8 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
                 push16(out, lcp)
                 push16(out, idx)
                 rhs = let_rest[am.end() :]
-                neg_lit = _try_negated_int_literal_rhs(rhs)
-                out += neg_lit if neg_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
+                bare_int_lit = _try_bare_int_literal_rhs(rhs)
+                out += bare_int_lit if bare_int_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
                 _append_comment(out, comment)
                 return bytes(out)
 
@@ -1434,8 +1478,8 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             push16(out, lcp)
             push16(out, idx)
             rhs = body[m.end() :]
-            neg_lit = _try_negated_int_literal_rhs(rhs)
-            out += neg_lit if neg_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
+            bare_int_lit = _try_bare_int_literal_rhs(rhs)
+            out += bare_int_lit if bare_int_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
             _append_comment(out, comment)
             return bytes(out)
 
