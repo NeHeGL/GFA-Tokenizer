@@ -1748,6 +1748,60 @@ _SIMPLE_KEYWORDS = {
     "ON BREAK GOSUB": 528, "ON BREAK CONT": 524, "ON BREAK": 520,
     "ON MENU MESSAGE GOSUB": 536, "ON MENU KEY GOSUB": 540,
     "ON MENU BUTTON": 544, "ON MENU GOSUB": 532, "ON MENU": 548,
+    # Bulk batch: every remaining gfalct statement keyword with zero
+    # code path anywhere in this file, found by diffing the full gfalct
+    # table against every lcp literal referenced in this module and
+    # cross-checking each candidate against gfalist_reference/sky.c's
+    # own decode switch (mmuman/gfalist, vendored in the companion GFA
+    # Decompiler project). None of these appear in that switch at all
+    # -- meaning, on the decode side, they need no special operand
+    # parsing beyond "print the keyword text, then decode whatever
+    # generic expression tokens follow" -- the same mechanism every
+    # other _SIMPLE_KEYWORDS entry already uses, just never confirmed
+    # per-keyword before. Where a base form and a "#"-channel form both
+    # exist for the same keyword (OPENW/OPENW #, etc.), the "#" form's
+    # lcp is used, confirmed as the real one via hell.lst's own
+    # 'OPENW #1,140,80,340,220,&X1' example. Excluded from this batch:
+    # bare PROCEDURE/FUNCTION (only the '> '-prefixed forms are
+    # confirmed real usage anywhere in ground truth), and _DATA=/V~H=
+    # (assignment-shaped, need a dedicated pre-check like DATE$=/TIME$=
+    # rather than a plain keyword entry). Not yet individually verified
+    # against a real compile -- see regression_tests/README.md in the
+    # companion project for the verification status of this batch.
+    "PLOT": 352, "PSET": 356, "ALINE": 360, "HLINE": 364,
+    "ARECT": 368, "APOLY": 372, "ACHAR": 376, "ACLIP": 380,
+    "COLOR": 384, "RECORD": 436, "ATEXT": 452, "LOCATE": 500,
+    "MENU": 556, "MENU OFF": 560, "MENU KILL": 564, "TEXT": 596,
+    "RCALL": 604, "CALL": 608, "FORM INPUT": 612, "LINE": 620,
+    "SETCOLOR": 844, "VDISYS": 860, "GEMSYS": 876, "VOID": 960,
+    "GET": 1028, "PUT": 1040, "OPENW #": 1068, "CLOSEW #": 1080,
+    "CLEAR": 1084, "CLEARW #": 1092, "TOPW #": 1096, "TITLEW #": 1100,
+    "INFOW #": 1104, "DEFLINE": 1108, "GRAPHMODE": 1112, "DEFMOUSE": 1116,
+    "DEFLIST": 1124, "DEFMARK": 1128, "DEFNUM": 1132, "DEFTEXT": 1136,
+    "DEFFILL": 1140, "BOX": 1148, "PBOX": 1152, "RBOX": 1156,
+    "PRBOX": 1160, "CIRCLE": 1164, "PCIRCLE": 1172, "ELLIPSE": 1180,
+    "PELLIPSE": 1188, "ERROR": 1196, "FILL": 1200, "HIDEM": 1208,
+    "LSET": 1216, "NEW": 1224, "QUIT": 1236, "HTAB": 1280,
+    "VTAB": 1284, "EXEC": 1292, "FIELD": 1296, "TOUCH #": 1304,
+    "EDIT": 1312, "FILESELECT": 1316, "NAME": 1320, "MOUSE": 1328,
+    "RSET": 1340, "SETTIME": 1344, "SGET": 1348, "SHOWM": 1352,
+    "SPUT": 1356, "SYSTEM": 1364, "VSYNC": 1368, "HARDCOPY": 1372,
+    "POLYLINE": 1388, "POLYFILL": 1392, "POLYMARK": 1396, "INSERT": 1400,
+    "RENAME": 1408, "STICK": 1412, "SOUND": 1416, "WAVE": 1420,
+    "CLIP": 1424, "FULLW": 1444, "DRAW": 1480, "SETMOUSE": 1496,
+    "KEYPAD": 1500, "KEYTEST": 1504, "KEYGET": 1508, "KEYLOOK": 1512,
+    "KEYPRESS": 1516, "KEYDEF": 1520, "BOUNDARY": 1548, "LIST": 1552,
+    "LLIST": 1556, "SAVE": 1560, "PSAVE": 1564, "CHAIN": 1568,
+    "RUN": 1572, "LOAD": 1580, "SETDRAW": 1584, "DUMP": 1592,
+    "BITBLT": 1596, "STORE": 1608, "RECALL": 1612, "SPRITE": 1636,
+    "OPTION": 1640, "RC_COPY": 1652, "MODE": 1656, "WRITE": 1664,
+    "VSETCOLOR": 1676, "CURVE": 1688, "MAT ADD": 1696, "MAT SUB": 1704,
+    "MAT CPY": 1712, "MAT XCPY": 1716, "MAT DET": 1720, "MAT NEG": 1724,
+    "MAT ABS": 1728, "MAT NORM": 1732, "MAT READ": 1736, "MAT PRINT": 1740,
+    "MAT TRANS": 1744, "MAT CLR": 1748, "MAT SET": 1752, "MAT ONE": 1756,
+    "MAT BASE": 1760, "MAT QDET": 1764, "MAT INPUT": 1768, "MAT RANG": 1772,
+    "MAT MUL": 1776, "MAT INV": 1792, "DMASOUND": 1800, "DMACONTROL": 1804,
+    "MW_OUT": 1808,
 }
 
 
@@ -1828,10 +1882,15 @@ def _expr_starts_string(text: str) -> bool:
 def _match_leading_keyword(body: str) -> tuple[int, int] | None:
     upper = body.upper()
     for kw in sorted(_SIMPLE_KEYWORDS, key=len, reverse=True):
-        if not kw[:1].isalpha():
+        if not kw[:1].isalpha() or not kw[-1:].isalnum():
             # Punctuation-led keywords (e.g. "~EVNT_TIMER(1)", GFA's
             # direct XBIOS/GEMDOS/AES call syntax) attach directly to
             # whatever follows -- no space/paren separator to require.
+            # Same for punctuation-TRAILED keywords like "OPENW #" --
+            # gfalct's own display text already bakes the '#' in, so the
+            # channel number that follows in real source ("OPENW #1,...")
+            # attaches directly to the keyword text with no extra
+            # separator of its own required either.
             if upper.startswith(kw):
                 return _SIMPLE_KEYWORDS[kw], len(kw)
             continue
