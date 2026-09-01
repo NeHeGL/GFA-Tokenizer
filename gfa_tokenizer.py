@@ -1129,15 +1129,23 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         _append_comment(out, comment)
         return bytes(out)
 
-    # "BYTE{addr}=value" / "WORD{...}" / "CARD{...}" / "LONG{...}" --
-    # direct memory-write statements, each its own dedicated lcp whose
-    # GFALCT text already includes the opening brace, followed by the
-    # address expression, the combined "}=" token (pft 67 -- same shape
-    # as array-element assignment's ")=" token), then the value expression.
-    m = re.match(r"^(BYTE|WORD|CARD|LONG)\{(.+)\}=(.+)$", body, re.IGNORECASE)
+    # "BYTE{addr}=value" / "WORD{...}" / "CARD{...}" / "LONG{...}" /
+    # "INT{...}" / "CHAR{...}" / "FLOAT{...}" / "DOUBLE{...}" /
+    # "SINGLE{...}" -- direct memory-write statements, each its own
+    # dedicated lcp whose GFALCT text already includes the opening
+    # brace, followed by the address expression, the combined "}="
+    # token (pft 67 -- same shape as array-element assignment's ")="
+    # token), then the value expression. Found via the companion GFA
+    # Decompiler project's MULTI_V1 round-trip work hitting
+    # 'CHAR{LPEEK(OB_SPEC(...))}=pack_name$' -- only BYTE/WORD/CARD/LONG
+    # were confirmed/implemented before; INT/CHAR/FLOAT/DOUBLE/SINGLE
+    # share the exact same "}=" shape, same GFALCT-brace convention.
+    m = re.match(r"^(BYTE|WORD|CARD|LONG|INT|CHAR|FLOAT|DOUBLE|SINGLE)\{(.+)\}=(.+)$", body, re.IGNORECASE)
     if m:
         kw, addr_expr, value_expr = m.group(1).upper(), m.group(2), m.group(3)
-        lcp = {"CARD": 932, "BYTE": 936, "LONG": 924, "WORD": 1672}[kw]
+        lcp = {"CARD": 932, "BYTE": 936, "LONG": 924, "WORD": 1672,
+               "INT": 928, "CHAR": 940, "FLOAT": 944, "DOUBLE": 948,
+               "SINGLE": 492}[kw]
         push16(out, lcp)
         out += tokenize_expr(addr_expr, 0, len(addr_expr), pool)
         out.append(PFT_TEXT_TO_CODE["}="])
@@ -1650,7 +1658,38 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
     # present, are just an ordinary "(" + generic tokens + ")" in the
     # stream that follows, identical in shape to "@name(args)" (lcp=248)
     # just without the leading "@" marker.
-    m = re.match(r"^([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))?\s*$", body)
+    #
+    # The naive version of this regex used a plain greedy '(.*)' for the
+    # argument list, which silently mismatched real assignments to a
+    # function-call target (e.g. 'OB_STATE(tree%,obj%)=BCLR(...)',
+    # confirmed real syntax -- GFA_BASIC_Version_3_Interpreter_User_
+    # Manual_OCR.pdf p.392, "addressed... for both reading and
+    # writing"): backtracking let '(.*)' swallow everything up to the
+    # LAST ')' in the whole line, silently absorbing the trailing
+    # '=BCLR(...)' into a garbled "argument list" instead of erroring
+    # loudly -- corrupting the statement instead of failing it. Fixed by
+    # finding the name's own matching close paren with explicit depth
+    # tracking and requiring nothing but whitespace after it, so a
+    # statement shaped like this one now correctly falls through to the
+    # "unrecognized statement" error below rather than being silently
+    # misencoded as a bare procedure call.
+    m = None
+    head = re.match(r"^([A-Za-z_][A-Za-z0-9_.$]*)\s*(\()?", body)
+    if head and head.group(2) is None and body[head.end(1):].strip() == "":
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))?\s*$", body)
+    elif head and head.group(2) is not None:
+        depth = 0
+        close = None
+        for k in range(head.end(2) - 1, len(body)):
+            if body[k] == "(":
+                depth += 1
+            elif body[k] == ")":
+                depth -= 1
+                if depth == 0:
+                    close = k
+                    break
+        if close is not None and body[close + 1 :].strip() == "":
+            m = re.match(r"^([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))\s*$", body[: close + 1])
     if m:
         name = m.group(1)
         ptype = 15 if name.endswith("$") else 11
