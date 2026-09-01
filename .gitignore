@@ -15,3 +15,7 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Detailed investigation/session log -- keeps full history for
+# continuity across sessions, but isn't meant for the public README
+DEVLOG.md
