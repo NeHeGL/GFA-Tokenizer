@@ -1513,6 +1513,23 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
                 _append_comment(out, comment)
                 return bytes(out)
 
+    # DATE$=/TIME$= -- dedicated pseudo-variable assignment lcps (1632,
+    # 1628), checked ahead of the generic string-assignment fallback
+    # below specifically so they don't get treated as an ordinary user
+    # string variable literally named "date"/"time" (which the generic
+    # path would silently do, since 'DATE$=...' matches its assignment
+    # regex just as well as any real string variable would). Confirmed
+    # directly from gfalct: 'TIME$=' and 'DATE$=' are their own distinct
+    # entries, textually identical to no other lcp.
+    m = re.match(r"^(DATE|TIME)\$\s*=\s*(.*)$", body, re.IGNORECASE)
+    if m:
+        lcp = 1632 if m.group(1).upper() == "DATE" else 1628
+        push16(out, lcp)
+        rhs = m.group(2)
+        out += tokenize_expr(rhs, 0, len(rhs), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
     m = _ASSIGN_RE.match(body)
     if m and m.group(2) in SUFFIX_TO_TYPE:
         name, sigil = m.group(1), m.group(2)
@@ -1699,6 +1716,38 @@ _SIMPLE_KEYWORDS = {
     # lcp 424/428's own distinct real-source triggers are still
     # unconfirmed -- left unhandled rather than guessed.
     "RESUME": 420,
+    # Batch found systematically via the companion GFA Decompiler
+    # project's command-coverage regression suite (deliberately
+    # exercising every gfalct/gfapft/gfasft entry, rather than waiting
+    # for real-world code to happen to hit a gap) rather than one at a
+    # time from real decompiled code. Each lcp is the single or lowest
+    # gfalct index sharing that keyword's display text, same convention
+    # as every other entry above; none of these have more than one
+    # non-generic real-argument form to disambiguate.
+    "SDPOKE": 404, "SLPOKE": 408, "DELAY": 440, "ABSOLUTE": 1012,
+    "RANDOMIZE": 1020, "CHDRIVE": 1248, "DIR": 1276, "FILES": 1300,
+    "MKDIR": 1324, "KILL": 1332, "RMDIR": 1336, "PAUSE": 1376,
+    "QSORT": 1380, "SSORT": 1384, "DEFINT": 1524, "DEFFLT": 1528,
+    "DEFBYT": 1532, "DEFWRD": 1536, "DEFBIT": 1540, "DEFSTR": 1544,
+    "TRON": 572, "TROFF": 584,
+    # CHDIR: never implemented -- explains a pre-existing workaround in
+    # the companion GFA Decompiler project (its MULTI_V1 round-trip test
+    # substituted a REM comment for the real CHDIR line rather than
+    # testing it, from before this statement's absence was diagnosed).
+    "CHDIR": 1244,
+    # ON ERROR GOSUB / ON BREAK GOSUB / ON BREAK CONT: confirmed via the
+    # independent gfalist/sky reference implementation (mmuman/gfalist,
+    # vendored in the companion GFA Decompiler project) that these are
+    # each their own fixed compound lcp -- NOT special-cased anywhere in
+    # gfalist's own decode switch, meaning (unlike bare GOSUB's dedicated
+    # PROCEDURE-group target resolution) the handler name after them is
+    # just an ordinary trailing generic expression, same as any other
+    # _SIMPLE_KEYWORDS entry. This corrects an earlier wrong assumption
+    # that they'd need a GOSUB-style dedicated case.
+    "ON ERROR GOSUB": 516, "ON ERROR": 512,
+    "ON BREAK GOSUB": 528, "ON BREAK CONT": 524, "ON BREAK": 520,
+    "ON MENU MESSAGE GOSUB": 536, "ON MENU KEY GOSUB": 540,
+    "ON MENU BUTTON": 544, "ON MENU GOSUB": 532, "ON MENU": 548,
 }
 
 
