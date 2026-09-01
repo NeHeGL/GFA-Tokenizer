@@ -1686,6 +1686,19 @@ _SIMPLE_KEYWORDS = {
     # caught the gap until the companion GFA Decompiler project tried to
     # round-trip a real ALERT statement.
     "ALERT": 1024,
+    # RESUME: gfalct has three entries sharing display text ('RESUME' at
+    # 420 with no trailing space, 'RESUME ' at 424 and 428 both with one)
+    # -- same "lowest lcp sharing that text is the plain/general-purpose
+    # form" convention as every other _SIMPLE_KEYWORDS entry. 420 alone
+    # covers every real form: bare 'RESUME', 'RESUME label'/'RESUME 0',
+    # AND 'RESUME NEXT' -- confirmed directly (round-tripped clean) that
+    # 'NEXT' isn't baked into a dedicated lcp the way 'DO WHILE' is; it
+    # rides through as an ordinary GFAPFT keyword token (code 168, "NEXT")
+    # inside the generic expression that follows RESUME's header, the
+    # same as any other bare keyword-shaped identifier in an expression.
+    # lcp 424/428's own distinct real-source triggers are still
+    # unconfirmed -- left unhandled rather than guessed.
+    "RESUME": 420,
 }
 
 
