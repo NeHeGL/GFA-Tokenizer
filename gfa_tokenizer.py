@@ -1679,6 +1679,13 @@ _SIMPLE_KEYWORDS = {
     "CLS": 1260,
     "DO WHILE": 196, "DO UNTIL": 200, "LOOP WHILE": 204, "LOOP UNTIL": 208,
     "ELSE IF": 64,
+    # lcp=1024 confirmed directly from ground truth: sky.lst's own GFALCT
+    # table dump (a companion project's test corpus) contains the literal
+    # line 'DATA 1024,"ALERT "', i.e. gfalct index 256 * 4 = 1024. ALERT
+    # had never been exercised by any program in that corpus, so nothing
+    # caught the gap until the companion GFA Decompiler project tried to
+    # round-trip a real ALERT statement.
+    "ALERT": 1024,
 }
 
 
