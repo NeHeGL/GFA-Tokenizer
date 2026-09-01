@@ -711,7 +711,30 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     just_saw_binary_arith_op = True
             else:
                 out.append(PFT_CODE_OVERRIDE.get(matched.upper(), code))
-                if matched[:1].isalpha():
+                if matched.upper() in ("L:", "W:"):
+                    # Size-cast markers for GEMDOS/XBIOS/BIOS call args
+                    # (confirmed real syntax, GFA_BASIC_Version_3_
+                    # Interpreter_User_Manual_OCR.pdf p.447: '~GEMDOS(9,
+                    # L:adr%)'). The literal that immediately follows
+                    # needs the same odd+filler re-arm as the numeric
+                    # argument right after a string-typed ','
+                    # (last_was_string branch below) or a fresh array
+                    # reference -- confirmed via a real MULTI_V1.PRG
+                    # round-trip: 'GEMDOS(32,L:0)' compiled clean with
+                    # the plain literal form for every OTHER argument in
+                    # the file, but the real 3.60TT compiler rejected
+                    # this exact line ('SAVE - not compiled', its own
+                    # generic dead-line error) until the literal right
+                    # after 'L:' got the odd+filler form instead -- the
+                    # OTHER confirmed instances of this shape in the same
+                    # file ('GEMDOS(72,L:-1)') happened to already dodge
+                    # the bug because '-1' routes through the separate
+                    # unary-minus rewrite, which independently already
+                    # produces odd+filler-equivalent bytes.
+                    array_open = True
+                    zero_filler = False
+                    just_saw_value = False
+                elif matched[:1].isalpha():
                     # Any other keyword match (a builtin function call,
                     # AND/OR/MOD/DIV/NOT, etc.) -- string-typed only if
                     # its own text ends in '$' (LEFT$(/DATE$/TIME$/...),
