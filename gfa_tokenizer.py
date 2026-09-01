@@ -1316,6 +1316,29 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         _append_comment(out, comment)
         return bytes(out)
 
+    # Bare "PROCEDURE name(args)" -- no leading "> " -- confirmed real
+    # usage from GFA_BASIC_3-5_Compiler_User_Manual_OCR.pdf p.35 (a C-
+    # function-replacement example listing uses bare "FUNCTION doub(a%)"
+    # directly; PROCEDURE is its confirmed structural sibling, same
+    # lcp-24/216 duplicate-text pairing this project's own convention
+    # elsewhere always treats as interchangeable). Needs the same
+    # dedicated name-pool resolution as "> PROCEDURE" above (lcp 24
+    # shares 216's exact decode behavior, including the auto-synthesized
+    # "(" -- both appear in the same INDENT_AFTER/type-decode groups) --
+    # NOT the generic _SIMPLE_KEYWORDS path, which was confirmed to
+    # silently resolve the name into the wrong pool group and corrupt it.
+    m = re.match(r"^PROCEDURE\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(\((.*)\))?\s*$", body, re.IGNORECASE)
+    if m:
+        idx = pool.get_or_add(11, m.group(1))
+        push16(out, 24)
+        push16(out, idx)
+        args = m.group(3)
+        if args is not None and args.strip():
+            out += tokenize_expr(args, 0, len(args), pool)
+            out.append(PFT_TEXT_TO_CODE[")"])
+        _append_comment(out, comment)
+        return bytes(out)
+
     m = re.match(r"^>\s*FUNCTION\s+([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))?\s*$", body, re.IGNORECASE)
     if m:
         # Unlike "> PROCEDURE " (lcp 216/24), which auto-synthesizes "("
@@ -1526,6 +1549,29 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         lcp = 1632 if m.group(1).upper() == "DATE" else 1628
         push16(out, lcp)
         rhs = m.group(2)
+        out += tokenize_expr(rhs, 0, len(rhs), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # V~H=/_DATA= -- same pseudo-variable-assignment shape as DATE$=/
+    # TIME$= above, confirmed from GFA_BASIC_Version_3_Interpreter_User_
+    # Manual_OCR.pdf: 'V~H=x' sets the internal VDI handle (p.353,
+    # "Sets the internal VDI handle... to the value x", e.g. 'V~H=-1');
+    # '_DATA=dp%(j%)' sets the DATA pointer (p.542-543's own worked
+    # example). Bare 'V~H'/'_DATA' (no '=', read forms) aren't in this
+    # project's missing-keyword list at all -- already resolved
+    # generically as ordinary PFT/SFT function tokens.
+    m = re.match(r"^V~H\s*=\s*(.*)$", body, re.IGNORECASE)
+    if m:
+        push16(out, 1624)
+        rhs = m.group(1)
+        out += tokenize_expr(rhs, 0, len(rhs), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+    m = re.match(r"^_DATA\s*=\s*(.*)$", body, re.IGNORECASE)
+    if m:
+        push16(out, 1692)
+        rhs = m.group(1)
         out += tokenize_expr(rhs, 0, len(rhs), pool)
         _append_comment(out, comment)
         return bytes(out)
@@ -1774,9 +1820,27 @@ _SIMPLE_KEYWORDS = {
     "MENU": 556, "MENU OFF": 560, "MENU KILL": 564, "TEXT": 596,
     "RCALL": 604, "CALL": 608, "FORM INPUT": 612, "LINE": 620,
     "SETCOLOR": 844, "VDISYS": 860, "GEMSYS": 876, "VOID": 960,
-    "GET": 1028, "PUT": 1040, "OPENW #": 1068, "CLOSEW #": 1080,
-    "CLEAR": 1084, "CLEARW #": 1092, "TOPW #": 1096, "TITLEW #": 1100,
-    "INFOW #": 1104, "DEFLINE": 1108, "GRAPHMODE": 1112, "DEFMOUSE": 1116,
+    "GET": 1028, "PUT": 1040,
+    # OPENW/CLOSEW/CLEARW/TITLEW/INFOW: confirmed from
+    # GFA_BASIC_Version_3_Interpreter_User_Manual_OCR.pdf (p.313-316)
+    # that BOTH the bare and "#"-prefixed forms are real, distinct
+    # source syntax -- 'OPENW nr [,x_pos,y_pos]' (simplified quadrant
+    # window) vs 'OPENW #n,x,y,w,h,attr' (full AES form), and
+    # 'CLEARW/TITLEW/INFOW [#] n' (the manual's own worked example uses
+    # bare 'CLEARW 1'/'TITLEW 4,...' directly alongside '#'-prefixed
+    # 'TOPW #1'/'CLOSEW #1'). OPENW/CLOSEW/CLEARW have their own
+    # separate lcp per form (bare vs '#'); TITLEW/INFOW share a single
+    # lcp for both spellings (gfalct has only the '#' text baked in, so
+    # bare input still decodes with a synthesized '#' -- same class of
+    # canonical-reformatting round-trip as case-folding elsewhere, not
+    # a literal-text-preserving one). Longest-key-first matching in
+    # _match_leading_keyword means a '#'-typed input tries the more
+    # specific entry first, avoiding the double-'#' bug a single
+    # '#'-only entry caused when fed bare input.
+    "OPENW #": 1068, "OPENW": 1064, "CLOSEW #": 1080, "CLOSEW": 1076,
+    "CLEAR": 1084, "CLEARW #": 1092, "CLEARW": 1088, "TOPW #": 1096,
+    "TITLEW #": 1100, "TITLEW": 1100, "INFOW #": 1104, "INFOW": 1104,
+    "DEFLINE": 1108, "GRAPHMODE": 1112, "DEFMOUSE": 1116,
     "DEFLIST": 1124, "DEFMARK": 1128, "DEFNUM": 1132, "DEFTEXT": 1136,
     "DEFFILL": 1140, "BOX": 1148, "PBOX": 1152, "RBOX": 1156,
     "PRBOX": 1160, "CIRCLE": 1164, "PCIRCLE": 1172, "ELLIPSE": 1180,
@@ -1802,6 +1866,15 @@ _SIMPLE_KEYWORDS = {
     "MAT BASE": 1760, "MAT QDET": 1764, "MAT INPUT": 1768, "MAT RANG": 1772,
     "MAT MUL": 1776, "MAT INV": 1792, "DMASOUND": 1800, "DMACONTROL": 1804,
     "MW_OUT": 1808,
+    # Bare "FUNCTION name(args)" -- confirmed real usage directly from
+    # GFA_BASIC_3-5_Compiler_User_Manual_OCR.pdf p.35 ("FUNCTION
+    # doub(a%)" in a C-function-replacement example). Unlike bare
+    # PROCEDURE (lcp 24, needs the same dedicated name-pool case as "> "
+    # PROCEDURE), lcp 40 round-trips correctly as a plain generic
+    # keyword -- confirmed directly, not assumed: the name+args that
+    # follow encode fine through the ordinary trailing-expression path,
+    # unlike PROCEDURE's name which corrupts if routed that way.
+    "FUNCTION": 40,
 }
 
 
