@@ -1607,6 +1607,44 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         _append_comment(out, comment)
         return bytes(out)
 
+    # INLINE addr%,length -- reserves a `length`-byte area within the
+    # program, initially zero-filled (GFA_BASIC_Version_3_Interpreter_
+    # User_Manual_OCR.pdf p.83: "addr: 4-byte integer variable... length:
+    # Integer constant, less than 32700... The reserved area always
+    # begins at an even address and it is initially filled with zeros.
+    # When implementing INLINE this address is written to the integer
+    # variable addr."). Confirmed byte-for-byte against a real editor-
+    # saved MULTI_V1.GFA (companion GFA Decompiler project): lcp=1668,
+    # then addr encoded as an ordinary bare variable-reference token
+    # (not baked into the header the way most other statements' operands
+    # are), then a literal ',' token, then marker byte 70, then -- if
+    # the position is now odd -- one zero pad byte for even alignment,
+    # then the `length` raw bytes themselves. The displayed `,length` in
+    # a decoded listing is derived from the actual embedded byte count,
+    # not stored as its own encoded number anywhere -- so there is
+    # nothing to encode for it beyond emitting exactly that many bytes.
+    # The real editor's own Help-key LOAD/SAVE/DUMP/CLEAR menu is the
+    # only way to populate this area with real non-zero content at
+    # edit time (out of reach for a text-only .lst source); this
+    # project's own convention is to zero-fill and load real content at
+    # runtime instead, with a BLOAD right after (see the companion GFA
+    # Decompiler project's README for MULTI_V1's own confirmed working
+    # example of this pattern). Per the manual, no trailing comment is
+    # possible on this statement (the byte that would hold it is
+    # reserved for the data area instead) -- any comment is dropped.
+    m = re.match(r"^INLINE\s+([A-Za-z_][A-Za-z0-9_.]*%)\s*,\s*(\d+)\s*$", body, re.IGNORECASE)
+    if m:
+        varexpr, length_str = m.groups()
+        length = int(length_str)
+        push16(out, 1668)
+        out += tokenize_expr(varexpr, 0, len(varexpr), pool)
+        out.append(PFT_TEXT_TO_CODE[","])
+        out.append(70)
+        if len(out) % 2 == 1:
+            out.append(0)
+        out += bytes(length)
+        return bytes(out)
+
     m = _ASSIGN_RE.match(body)
     if m and m.group(2) in SUFFIX_TO_TYPE:
         name, sigil = m.group(1), m.group(2)
