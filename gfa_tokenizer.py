@@ -1132,6 +1132,59 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         _append_comment(out, comment)
         return bytes(out)
 
+    # "OB_NEXT(tree,obj)=value" / "OB_HEAD(...)" / "OB_TAIL(...)" /
+    # "OB_TYPE(...)" / "OB_FLAGS(...)" / "OB_STATE(...)" / "OB_X(...)" /
+    # "OB_Y(...)" / "OB_W(...)" / "OB_H(...)" -- direct object-structure
+    # field writes. GFA_BASIC_Version_3_Interpreter_User_Manual_OCR.pdf
+    # p.391 lists these together, explicitly addressed "for both reading
+    # and writing" with no dereference wrapper -- unlike OB_SPEC (listed
+    # right alongside them in the same sentence, but semantically
+    # different: it returns a POINTER to further data, read via
+    # CHAR{}/LONG{}/etc., never assigned to directly) -- so OB_SPEC is
+    # deliberately excluded here.
+    #
+    # Same shape as MID$( above: dedicated lcp (each GFALCT text already
+    # includes its own opening paren), the args, the combined ")=" token,
+    # then the value expression -- confirmed byte-for-byte against a real
+    # editor-saved .GFA for 'OB_STATE(tree_main%,obj_main_items&)=0'
+    # (found via the companion GFA Decompiler project's MULTI_V1 crash
+    # investigation: an earlier version of that project's own matcher
+    # used a '{OB_STATE(...)}=value' curly-brace wrapper here, reasoning
+    # by analogy with OB_SPEC/BYTE{/WORD{ -- since the bare form didn't
+    # tokenize at the time -- but that wrapper compiles to a completely
+    # different, broken instruction sequence: real GFA-BASIC calls two
+    # distinct GFA3BLIB routines, a dedicated OB_STATE getter then a
+    # dedicated setter; the curly-brace-compiled form calls the same
+    # getter routine twice and does a raw pointer store instead, applying
+    # BCLR to an address rather than a value and corrupting the target --
+    # confirmed as the actual root cause of a real Bus Error crash).
+    # lcp=988 itself (OB_STATE's own) was independently confirmed via
+    # that same real .GFA file's own bytes, matching gfalist_reference's
+    # documented value exactly.
+    #
+    # The value expression needs array_open=True -- confirmed against
+    # that same real .GFA file: a bare integer RHS here ('=0') encodes as
+    # plain pft 201 followed directly by the raw 4-byte value with NO
+    # pft-200 filler byte (the "odd+filler" convention
+    # _try_bare_int_literal_rhs implements is specific to that other,
+    # unrelated context; this one is one byte shorter). array_open=True
+    # reproduces that exact shorter encoding for a bare integer literal
+    # here; a real expression RHS (e.g. 'BCLR(OB_STATE(tree,obj),0)')
+    # goes through tokenize_expr's normal function-call path regardless
+    # of this flag, so it isn't affected.
+    m = re.match(r"^(OB_NEXT|OB_HEAD|OB_TAIL|OB_TYPE|OB_FLAGS|OB_STATE|OB_X|OB_Y|OB_W|OB_H)\((.+)\)=(.+)$", body, re.IGNORECASE)
+    if m:
+        kw, args_expr, value_expr = m.group(1).upper(), m.group(2), m.group(3)
+        lcp = {"OB_NEXT": 968, "OB_HEAD": 972, "OB_TAIL": 976, "OB_TYPE": 980,
+               "OB_FLAGS": 984, "OB_STATE": 988, "OB_X": 996, "OB_Y": 1000,
+               "OB_W": 1004, "OB_H": 1008}[kw]
+        push16(out, lcp)
+        out += tokenize_expr(args_expr, 0, len(args_expr), pool)
+        out.append(PFT_TEXT_TO_CODE[")="])
+        out += tokenize_expr(value_expr, 0, len(value_expr), pool, array_open=True)
+        _append_comment(out, comment)
+        return bytes(out)
+
     # "{addr}=value" -- untyped (word-size) generic memory-write, the
     # bare-brace counterpart of BYTE{/WORD{/CARD{/LONG{ below (lcp=920,
     # own GFALCT text is just "{"). addr can itself contain a nested
