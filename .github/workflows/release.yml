@@ -41,7 +41,7 @@ jobs:
         shell: pwsh
         run: |
           $zipName = "GFA-Tokenizer-${{ inputs.version }}-windows-x64.zip"
-          Compress-Archive -Path "dist\GFA Tokenizer.exe", README.md -DestinationPath $zipName -Force
+          Compress-Archive -Path "dist\GFA Tokenizer.exe", README.md, LICENSE -DestinationPath $zipName -Force
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
       - name: Build release notes
