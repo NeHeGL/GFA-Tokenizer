@@ -1472,7 +1472,12 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     # dedicated case (rather than falling through _SIMPLE_KEYWORDS into
     # the generic expression tokenizer's bare-identifier-is-a-label
     # fallback) specifically so the target lands in the right group.
-    m = re.match(r"^GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:\((.*)\))?\s*$", body, re.IGNORECASE)
+    # Target name may start with a digit ("GOSUB 1370", confirmed real
+    # source -- BEAN_ADV.LST, calling a numeric-named PROCEDURE, same
+    # "old line-numbered BASIC" naming this project's own '@2030' fix
+    # documents). Safe to widen here for the same reason as '@name':
+    # "GOSUB " is itself a unique, unambiguous keyword prefix.
+    m = re.match(r"^GOSUB\s+([A-Za-z0-9_][A-Za-z0-9_.]*)\s*(?:\((.*)\))?\s*$", body, re.IGNORECASE)
     if m:
         name, args = m.groups()
         idx = pool.get_or_add(11, name)
@@ -1515,7 +1520,11 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
         _append_comment(out, comment)
         return bytes(out)
 
-    m = re.match(r"^>\s*PROCEDURE\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(\((.*)\))?\s*$", body, re.IGNORECASE)
+    # Name may start with a digit -- same "old line-numbered BASIC"
+    # naming as '@2030'/'GOSUB 1370' (BEAN_ADV.LST's own
+    # 'PROCEDURE 1370', called both ways). Safe to widen here too:
+    # "> PROCEDURE " is a unique, unambiguous keyword prefix.
+    m = re.match(r"^>\s*PROCEDURE\s+([A-Za-z0-9_][A-Za-z0-9_.]*)\s*(\((.*)\))?\s*$", body, re.IGNORECASE)
     if m:
         idx = pool.get_or_add(11, m.group(1))
         push16(out, 216)
@@ -1538,7 +1547,7 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     # "(" -- both appear in the same INDENT_AFTER/type-decode groups) --
     # NOT the generic _SIMPLE_KEYWORDS path, which was confirmed to
     # silently resolve the name into the wrong pool group and corrupt it.
-    m = re.match(r"^PROCEDURE\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(\((.*)\))?\s*$", body, re.IGNORECASE)
+    m = re.match(r"^PROCEDURE\s+([A-Za-z0-9_][A-Za-z0-9_.]*)\s*(\((.*)\))?\s*$", body, re.IGNORECASE)
     if m:
         idx = pool.get_or_add(11, m.group(1))
         push16(out, 24)
