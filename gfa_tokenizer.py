@@ -1753,6 +1753,27 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
             _append_comment(out, comment)
             return bytes(out)
 
+    # Bare array-element ADD/SUB/MUL/DIV ('ADD arr(i),v', no sigil at all) --
+    # same DIM-pre-scan gating as bare array-element INC/DEC above. Confirmed
+    # real: BALL.LST's own 'ADD b_state(which), b_dir(which)' (b_state DIM'd
+    # bare).
+    m = re.match(
+        r"^(ADD|SUB|MUL|DIV)\s+([A-Za-z_][A-Za-z0-9_.]*)\((.*?)\)\s*,\s*(.*)$", body, re.IGNORECASE,
+    )
+    if m and m.group(2).lower() in declared_arrays:
+        kw, name, index_expr, value_expr = m.groups()
+        kw = kw.upper()
+        lcp = ARRAY_ARITH_LCP.get(kw, {})[4]
+        idx = pool.get_or_add(4, name)
+        push16(out, lcp)
+        push16(out, idx)
+        out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
+        out.append(PFT_TEXT_TO_CODE[")"])
+        out.append(PFT_TEXT_TO_CODE[","])
+        out += tokenize_expr(value_expr, 0, len(value_expr), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
     m = re.match(
         r"^(ADD|SUB|MUL|DIV)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?\s*,\s*(.*)$", body, re.IGNORECASE,
     )
