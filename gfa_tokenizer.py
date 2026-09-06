@@ -2072,6 +2072,11 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                         if not _expr_starts_string(chunk):
                             out.append(55)
                         out += tokenize_expr(chunk, 0, len(chunk), pool)
+            elif lcp == 840:
+                # DIM -- see _encode_dim_list's own docstring for why
+                # this can't just go through the generic tokenize_expr
+                # call every other _SIMPLE_KEYWORDS statement uses.
+                out += _encode_dim_list(rest, pool)
             else:
                 out += tokenize_expr(rest, 0, len(rest), pool)
         _append_comment(out, comment)
@@ -2409,6 +2414,91 @@ _SIMPLE_KEYWORDS = {
 # generalization (INTEGER, REAL, LONG, etc. also needing it) is still
 # pending its own direct confirmation.
 PRINT_LCPS = {588, 1212}
+
+
+def _split_top_level_commas(text: str) -> list[str]:
+    """Splits text at top-level ',' separators (outside quotes and
+    parens), e.g. DIM's own 'x(50),y(50)' declaration list.
+    """
+    items: list[str] = []
+    depth = 0
+    in_quote = False
+    start = 0
+    for i, c in enumerate(text):
+        if in_quote:
+            if c == '"':
+                in_quote = False
+        elif c == '"':
+            in_quote = True
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif depth == 0 and c == ",":
+            items.append(text[start:i])
+            start = i + 1
+    items.append(text[start:])
+    return items
+
+
+_DIM_ITEM_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?\((.*)\)$", re.DOTALL)
+
+
+def _encode_dim_list(rest: str, pool: IdentPool) -> bytes:
+    """Encodes DIM's own comma-separated array-declaration list.
+
+    Can't just hand the whole list to tokenize_expr like every other
+    _SIMPLE_KEYWORDS statement's argument list: parse_var_ref
+    deliberately never matches a BARE name immediately followed by '('
+    as an array (see its own docstring -- doing so would make 'SIN(x)'
+    lose to a same-shaped bare-array match in tokenize_expr's generic
+    var-ref/keyword race). Inside DIM specifically there's no such
+    ambiguity -- every comma-separated item is unambiguously a
+    declaration, never a builtin call -- so this walks the list itself
+    and emits each item as a genuine array var-ref (the same byte shape
+    tokenize_expr's own var-ref branch produces for a SUFFIXED array
+    like '&(', just computed directly here for the bare/type-4 case too)
+    followed by its dimension-list expression and closing ')'.
+    ARRAY_ASSIGN_LCP-style bare-array support elsewhere in this file
+    already treats an unsuffixed array as type 4 ('#(', Float being the
+    documented default type) -- reused here for consistency.
+
+    Confirmed real, and a genuine bug fix: BALL.LST's own 'DIM
+    x(50),y(50),x1(50),x2(50),y1(50),y2(50),sp$(50),spb$(50)' -- before
+    this, the six bare entries were silently encoded as a scalar var-ref
+    immediately followed by a stray '(', a literal, and ')' as three
+    unrelated tokens (text-identical on decode, since concatenating
+    "x#" + "(" + "50" + ")" still LOOKS like "x#(50)" on a round-trip
+    display -- but structurally wrong). The real GFA-BASIC 3.60TT
+    compiler rejected the resulting file with a "Division by zero"
+    compile-time error; reloading it in the real editor and resaving it
+    as text (which doesn't require a full compile) never caught this.
+    """
+    out = bytearray()
+    for i, item in enumerate(_split_top_level_commas(rest)):
+        if i:
+            out.append(PFT_TEXT_TO_CODE[","])
+        stripped = item.strip()
+        m = _DIM_ITEM_RE.match(stripped)
+        if not m:
+            # Not a recognized array-declaration shape (e.g. a bare
+            # scalar DIM, if that's ever real source) -- fall through to
+            # the generic expression tokenizer for just this one item,
+            # same as before this function existed.
+            out += tokenize_expr(stripped, 0, len(stripped), pool)
+            continue
+        name, sigil, dims = m.groups()
+        type_ = SUFFIX_TO_TYPE[sigil + "("] if sigil else 4
+        idx = pool.get_or_add(type_, name)
+        if idx < 256:
+            out.append(224 + type_)
+            out.append(idx)
+        else:
+            out.append(240 + type_)
+            push16(out, idx)
+        out += tokenize_expr(dims, 0, len(dims), pool, array_open=True)
+        out.append(PFT_TEXT_TO_CODE[")"])
+    return bytes(out)
 
 
 def _split_print_items(text: str) -> list[str]:
