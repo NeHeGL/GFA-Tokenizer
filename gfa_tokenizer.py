@@ -306,7 +306,24 @@ def parse_var_ref(text: str, pos: int) -> tuple[int, str, bool, int] | None:
             type_ = SUFFIX_TO_TYPE[suf]
             is_array = suf.endswith("(")
             return type_, name, is_array, p + len(suf)
-    return None
+    # No sigil at all: Float ('#') is GFA-Basic's documented default
+    # variable type ("As this is the default type, no postfix is
+    # necessary"), confirmed against real-world archived source
+    # (TRUCOLST's bare 'rez', among others) -- an ordinary bare scalar,
+    # type 0.
+    #
+    # Deliberately NOT extended to "name immediately followed by '('
+    # means a bare float array": that would make this function match
+    # THROUGH the '(', competing on length against this same function's
+    # caller (see tokenize_expr's own longest-match-wins comment) against
+    # every builtin function call that isn't sigil-shadowed -- 'SIN(x)'
+    # would out-length keyword-table's 3-char 'SIN' match with this
+    # branch's 4-char 'SIN(' and get silently mistokenized as a bare
+    # array reference. A bare array DECLARATION (MOLMASSE's own
+    # 'DIM atomgewicht(69)') needs its own fix elsewhere, gated to
+    # contexts that are unambiguously a declaration, not simply reusing
+    # this shared expression-level identifier parser.
+    return 0, name, False, p
 
 
 # ---------------------------------------------------------------------------
@@ -912,7 +929,15 @@ NEXT_LCP = {0: 124, 2: 136, 8: 148, 9: 160}
 
 # Simple no-argument / fixed-text statements: matched directly against
 # GFALCT text, no special header beyond the keyword itself.
-_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])=(?!=)")
+#
+# The suffix is optional: Float ('#') is GFA-Basic's documented default
+# variable type ("As this is the default type, no postfix is necessary"),
+# so a bare name here ('rez=XBIOS(4)', confirmed against real-world
+# archived source -- TRUCOLST.LST and others) is an ordinary type-0
+# float assignment, same as if '#' had been written explicitly. Callers
+# must treat a missing group(2) as type 0, not skip the statement --
+# see the two call sites below.
+_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?=(?!=)")
 
 _INT_RHS_RE = re.compile(r"^(-?\d+)\s*$")
 
@@ -1454,12 +1479,15 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         return bytes(out)
 
     m = re.match(
-        r"^FOR\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])=(.*?)\s+TO\s+(.*?)(?:\s+STEP\s+(.*))?$",
+        r"^FOR\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?=(.*?)\s+TO\s+(.*?)(?:\s+STEP\s+(.*))?$",
         body, re.IGNORECASE,
     )
     if m:
         name, sigil, start_expr, to_expr, step_expr = m.groups()
-        type_ = SUFFIX_TO_TYPE.get(sigil)
+        # No suffix: Float is GFA-Basic's documented default variable
+        # type ("As this is the default type, no postfix is necessary"),
+        # so a bare loop variable is an ordinary type-0 float.
+        type_ = SUFFIX_TO_TYPE.get(sigil) if sigil else 0
         if step_expr is None:
             lcp = FOR_NO_STEP_LCP.get(type_) if type_ is not None else None
         else:
@@ -1485,10 +1513,10 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             _append_comment(out, comment)
             return bytes(out)
 
-    m = re.match(r"^NEXT(\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|]))?\s*$", body, re.IGNORECASE)
+    m = re.match(r"^NEXT(\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?)?\s*$", body, re.IGNORECASE)
     if m and m.group(2):
         name, sigil = m.group(2), m.group(3)
-        type_ = SUFFIX_TO_TYPE.get(sigil)
+        type_ = SUFFIX_TO_TYPE.get(sigil) if sigil else 0
         lcp = NEXT_LCP.get(type_) if type_ is not None else None
         if lcp is not None:
             idx = pool.get_or_add(type_, name)
@@ -1515,11 +1543,11 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             return bytes(out)
 
     m = re.match(
-        r"^(INC|DEC)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\s*$", body, re.IGNORECASE,
+        r"^(INC|DEC)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?\s*$", body, re.IGNORECASE,
     )
     if m:
         kw, name, sigil = m.group(1).upper(), m.group(2), m.group(3)
-        type_ = SUFFIX_TO_TYPE.get(sigil)
+        type_ = SUFFIX_TO_TYPE.get(sigil) if sigil else 0
         lcp = (INC_LCP if kw == "INC" else DEC_LCP).get(type_) if type_ is not None else None
         if lcp is not None:
             idx = pool.get_or_add(type_, name)
@@ -1553,11 +1581,11 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             return bytes(out)
 
     m = re.match(
-        r"^(ADD|SUB|MUL|DIV)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\s*,\s*(.*)$", body, re.IGNORECASE,
+        r"^(ADD|SUB|MUL|DIV)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?\s*,\s*(.*)$", body, re.IGNORECASE,
     )
     if m:
         kw, name, sigil, value_expr = m.group(1).upper(), m.group(2), m.group(3), m.group(4)
-        type_ = SUFFIX_TO_TYPE.get(sigil)
+        type_ = SUFFIX_TO_TYPE.get(sigil) if sigil else 0
         lcp = ARITH_STMT_LCP.get(kw, {}).get(type_) if type_ is not None else None
         if lcp is not None:
             idx = pool.get_or_add(type_, name)
@@ -1606,9 +1634,9 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
                 _append_comment(out, comment)
                 return bytes(out)
         am = _ASSIGN_RE.match(let_rest)
-        if am and am.group(2) in SUFFIX_TO_TYPE:
+        if am and (not am.group(2) or am.group(2) in SUFFIX_TO_TYPE):
             name, sigil = am.group(1), am.group(2)
-            type_ = SUFFIX_TO_TYPE[sigil]
+            type_ = SUFFIX_TO_TYPE[sigil] if sigil else 0
             lcp = LET_ASSIGN_LCP.get(type_)
             if lcp is not None:
                 idx = pool.get_or_add(type_, name)
@@ -1699,9 +1727,9 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         return bytes(out)
 
     m = _ASSIGN_RE.match(body)
-    if m and m.group(2) in SUFFIX_TO_TYPE:
+    if m and (not m.group(2) or m.group(2) in SUFFIX_TO_TYPE):
         name, sigil = m.group(1), m.group(2)
-        type_ = SUFFIX_TO_TYPE[sigil]
+        type_ = SUFFIX_TO_TYPE[sigil] if sigil else 0
         lcp = ASSIGN_LCP.get(type_)
         if lcp is not None:
             idx = pool.get_or_add(type_, name)
