@@ -2,7 +2,7 @@
 
 ![GFA Tokenizer](app_image.jpg)
 
-**Direction: `.lst` -> `.gfa`** (readable source in, tokenized binary out). For the reverse direction (`.gfa` -> `.lst`), see the companion [GFA Detokenizer](https://github.com/) project.
+**Direction: `.lst` -> `.gfa`** (readable source in, tokenized binary out). For the reverse direction (`.gfa` -> `.lst`), see the companion [GFA Detokenizer](https://github.com/NeHeGL/GFA-Detokenizer) project.
 
 Converts readable GFA-BASIC `.lst` source listings into the tokenized `.gfa` binary format the Atari ST GFA-BASIC editor loads and saves. Produced files can be loaded into the real GFA-BASIC editor and compiled with the real compiler.
 
@@ -41,16 +41,17 @@ Every construct this tool supports has been confirmed against the real GFA-BASIC
 
 ## Supported Constructs
 
-- Scalar assignment (`x%=5`, `y$="text"`, all six sigils: `#` `$` `%` `!` `&` `|`, with or without an explicit `LET`) and **array-element assignment** (`a%(i)=5`, index expression can be arbitrary), with a full expression on the right-hand side (arithmetic, comparisons, function/built-in calls, string literals, numbers in decimal/`&H`/`&O`/`&X`). Array-element *reads* work anywhere an expression is expected (e.g. `y%=a%(0)+3`).
+- Scalar assignment (`x%=5`, `y$="text"`, all six sigils: `#` `$` `%` `!` `&` `|`, with or without an explicit `LET`) — the suffix is optional (`rez=XBIOS(4)` is a plain type-0 float, same as `rez#=XBIOS(4)`, matching Float being the documented default type) — and **array-element assignment** (`a%(i)=5`, index expression can be arbitrary), with a full expression on the right-hand side (arithmetic, comparisons, function/built-in calls, string literals, numbers in decimal/`&H`/`&O`/`&X`). Array-element *reads* work anywhere an expression is expected (e.g. `y%=a%(0)+3`).
 - Every built-in function/operator in the keyword tables, including the ones whose names collide with the array-reference sigils (`STR$(`, `CHR$(`, `OCT$(`, `MID$(`, `SHL&(`, and the ~30 others like them) — these resolve as the built-in, not a same-named user array.
 - `MID$(str$,pos,len)=value$`, the in-place substring-assignment statement form (distinct from `MID$(` used as a read-only function).
 - `DIM`, `ARRAYFILL`.
-- `IF`/`ENDIF`/`ELSE`/`ELSE IF`, `DO`/`LOOP`, `DO WHILE`/`LOOP UNTIL` and the other `DO`/`LOOP` compound forms, `WHILE`/`WEND`, `REPEAT`/`UNTIL`, `SELECT`/`CASE`/`DEFAULT`/`ENDSELECT`, `FOR`/`NEXT` (numeric/integer loop variable types, with or without an explicit `STEP`).
-- `INC`/`DEC` and the `ADD`/`SUB`/`MUL`/`DIV` compound-assignment statements (`INC i%`, `ADD i%,5`, `INC a%(i)`) for both scalar and array-element targets.
+- `IF`/`ENDIF`/`ELSE`/`ELSE IF`, `DO`/`LOOP`, `DO WHILE`/`LOOP UNTIL` and the other `DO`/`LOOP` compound forms, `WHILE`/`WEND`, `REPEAT`/`UNTIL`, `SELECT`/`CASE`/`DEFAULT`/`ENDSELECT`, `FOR`/`NEXT` (numeric/integer loop variable types, with or without an explicit `STEP`; loop variable's suffix is optional, same as scalar assignment above).
+- `INC`/`DEC` and the `ADD`/`SUB`/`MUL`/`DIV` compound-assignment statements (`INC i%`, `ADD i%,5`, `INC a%(i)`) for both scalar and array-element targets (scalar forms' suffix is optional here too).
 - `LOCAL`, comments (`'` and `REM`, both standalone and trailing `!`-comments — correctly distinguished from a `!` single-precision sigil like `a!=0`), blank lines, labels (`name:`), `$directive`/`.directive` metacommand lines (raw passthrough, e.g. `$m 1000000`, `.ifndef X`).
-- Bare and `>`-prefixed `PROCEDURE name(args)` / `FUNCTION name(args)` declarations, `DEFFN name(args)=expr`, bare `RETURN` / `RETURN value`, and procedure calls via `@name(args)` or bare `name(args)`.
+- Bare and `>`-prefixed `PROCEDURE name(args)` / `FUNCTION name(args)` declarations, `DEFFN name(args)=expr` (params are optional, matching the real `DEFFN func[(x1,x2,...)]=expression` syntax — `DEFFN name=expr` with no parens at all works too), bare `RETURN` / `RETURN value`, and procedure calls via `@name(args)` or bare `name(args)`.
+- `*var%=expr`, the pre-3.0-era pointer-dereference write (writes through the address `var%` holds, per the manual's `ARRPTR()`/`*` operator).
 - `GOTO`, `GOSUB` (including `AFTER`/`EVERY ... GOSUB` and every `ON ERROR`/`ON BREAK`/`ON MENU ... GOSUB` event-trap form), `ON`, `RESTORE`, `READ`, `DATA`, `END`, `STOP`, `CONT`, `SWAP`, `ERASE`, `CLR`, `INPUT`, `LINE INPUT`, `POKE`/`DPOKE`/`LPOKE`/`SPOKE`, `BYTE{`/`WORD{`/`CARD{`/`LONG{`/`INT{`/`CHAR{`/`FLOAT{`/`DOUBLE{`/`SINGLE{`/`{` memory-write statements, `OPEN`/`CLOSE`, `OUT`/`OUT&`/`OUT%`, `SEEK`/`RELSEEK`, `BSAVE`/`BLOAD`, `BPUT`/`BGET`, `BMOVE`, `RESERVE`, `INLINE addr%,length`, `DELETE`, `CLS`, `PRINT`/`LPRINT`, `~`-prefixed direct calls (`~EVNT_TIMER(1)`, `~GEMDOS(...)`), the full graphics/window/object-tree/mouse-keyboard/file command set (`BOX`, `CIRCLE`, `OPENW`, `OB_STATE`, `KEYGET`, `LOF(#`, and the rest), and GEMDOS/XBIOS/BIOS `L:`/`W:` size-cast call arguments.
-- Hex/octal/binary numeric literals (`&H1F`, `&O17`, `&X101`) preserve their original notation on round-trip, including the real compiler's own lossy behavior for values needing the top bit of a 32-bit word (e.g. `&HFFFFFFFF` becomes `&H-1`, exactly as the real compiler's own output does).
+- Hex/octal/binary numeric literals (`&H1F`, `&O17`, `&X101`) preserve their original notation on round-trip, including values needing the top bit of a 32-bit word (e.g. `&HFFFFFFFF` round-trips correctly, matching the real compiler's own bytes).
 
 ## Known Limitations
 
