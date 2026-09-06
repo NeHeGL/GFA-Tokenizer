@@ -90,6 +90,24 @@ for _i, _name in enumerate(GFAPFT):
     if key not in PFT_TEXT_TO_CODE:
         PFT_TEXT_TO_CODE[key] = _i
 
+# "KEY" (GFAPFT 170) has no legitimate standalone use as a generic
+# expression atom -- its only real GFA-BASIC appearance is inside the
+# "ON MENU KEY GOSUB" event-trap statement (see ON_STATEMENT_LCP's own
+# "ON MENU KEY GOSUB" entry), which is matched and encoded entirely by
+# its own dedicated regex before ever reaching tokenize_expr. Leaving
+# it in this generic table meant tokenize_expr's var-ref-vs-keyword
+# tie-break (which favors the keyword, correct for real collisions like
+# CHR$( shadowing a same-named array -- see that tie-break's own
+# comment) wrongly turned a plain bare variable named "key" into this
+# keyword's token everywhere it appeared inside an expression, even
+# though the real compiler happily lets "key" be an ordinary variable
+# there. Confirmed real: BALL.LST's own "key=ASC(INKEY$)" / "EXIT IF
+# key==27" / etc. -- reloading our tokenized output in the real
+# GFA-BASIC editor and resaving it turned every expression use of "key"
+# into "KEY", verified against the same editor's own resave of the
+# real, untouched BALL.GFA (which keeps "key" as a plain variable).
+del PFT_TEXT_TO_CODE["KEY"]
+
 # GFA-BASIC uses a DIFFERENT opcode for the numeric and string forms of
 # '+' (concatenation) and every comparison operator, even though both
 # read identically in source -- GFAPFT lists each of these texts twice
@@ -649,6 +667,34 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             last_was_string = False
             just_saw_value = True
             continue
+        # A word operator (MOD/DIV/AND/...) glued directly onto a
+        # following digit with no space (e.g. '(x+2)MOD3') still has to
+        # be recognized as the operator, not as one long bare identifier
+        # "mod3" -- _try_match_keyword's own word-boundary check (see its
+        # docstring) treats a following digit as continuing the same
+        # word, which is right for a genuine identifier prefix collision
+        # (a variable named "mod2" must not be split into "MOD"+"2") but
+        # wrong here: right after a value, the grammar requires an
+        # OPERATOR next, so a value-shaped word can only start once the
+        # operator's own text has been consumed. Gated on just_saw_value
+        # so it only fires where an operator is actually expected, never
+        # at the start of a new operand (where "mod3" as a genuine
+        # variable name must still parse as one identifier). Confirmed
+        # real: BALL.LST's own '(b_line(0)+2)MOD3' -- reloading our
+        # tokenized output in the real GFA-BASIC editor and resaving it
+        # showed 'mod3' passed through as literal text instead of the
+        # MOD operator, verified against the same editor's own resave of
+        # the real, untouched BALL.GFA (which shows 'MOD 3').
+        if just_saw_value:
+            wm = re.match(r"[A-Za-z]+", text[pos:end])
+            if wm and wm.group(0).upper() in WORD_OPERATORS and wm.end() < end - pos and text[pos + wm.end()].isdigit():
+                word = wm.group(0).upper()
+                code = PFT_TEXT_TO_CODE[word]
+                out.append(code)
+                pos += wm.end()
+                just_saw_value = False
+                last_was_string = False
+                continue
         # Try a variable/array reference AND both keyword tables, then take
         # whichever match consumes the MOST text, with keywords winning a
         # tie. A reserved word always wins a tie because the real compiler
