@@ -1697,6 +1697,24 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
             _append_comment(out, comment)
             return bytes(out)
 
+    # Bare array-element INC/DEC ('DEC arr(i)', no sigil at all) -- same
+    # DIM-pre-scan gating as bare array-element assignment above.
+    # Confirmed real: BALL.LST's own 'DEC snd_timer(i)' (snd_timer
+    # DIM'd bare).
+    m = re.match(
+        r"^(INC|DEC)\s+([A-Za-z_][A-Za-z0-9_.]*)\((.*?)\)\s*$", body, re.IGNORECASE,
+    )
+    if m and m.group(2).lower() in declared_arrays:
+        kw, name, index_expr = m.group(1).upper(), m.group(2), m.group(3)
+        lcp = (ARRAY_INC_LCP if kw == "INC" else ARRAY_DEC_LCP)[4]
+        idx = pool.get_or_add(4, name)
+        push16(out, lcp)
+        push16(out, idx)
+        out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
+        out.append(PFT_TEXT_TO_CODE[")"])
+        _append_comment(out, comment)
+        return bytes(out)
+
     m = re.match(
         r"^(INC|DEC)\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?\s*$", body, re.IGNORECASE,
     )
@@ -2372,16 +2390,22 @@ MAGIC = b"GFA-BASIC3"
 _DIM_LINE_RE = re.compile(r"^\s*DIM\s+(.*)$", re.IGNORECASE)
 _DIM_BARE_NAME_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\(")
 
-# GFA-BASIC's five built-in VDI parameter-block arrays -- always
-# available bare, with no DIM required, unlike a user array. Confirmed
-# real: EASYMINT.LST's own 'CONTRL(0)=101' etc. (a companion project's
-# real-world archive) has no DIM anywhere in the file, and the official
-# compiler's own bundled test archive (hell.lst) independently lists
-# all five as recognized built-in names with their own numeric codes
-# (DATA 880,"PTSIN(" / 884,"PTSOUT(" / 888,"INTIN(" / 892,"INTOUT(") --
-# standard Atari ST GEM VDI communication arrays, not project-specific
-# guesswork.
-_BUILTIN_BARE_ARRAYS = {"contrl", "intin", "intout", "ptsin", "ptsout"}
+# GFA-BASIC's built-in VDI parameter-block arrays -- always available
+# bare, with no DIM required, unlike a user array. Confirmed real:
+# EASYMINT.LST's own 'CONTRL(0)=101'/'GCONTRL(0)=48' etc. (a companion
+# project's real-world archive) has no DIM anywhere in the file for any
+# of these, and the official compiler's own bundled test archive
+# (hell.lst) independently lists all eight as recognized built-in names
+# with their own numeric codes (DATA 880,"PTSIN(" / 884,"PTSOUT(" /
+# 888,"INTIN(" / 892,"INTOUT(" / 904,"GINTIN(" / 908,"GINTOUT(" /
+# 916,"GCONTRL(") -- the standard screen-VDI set (CONTRL/INTIN/INTOUT/
+# PTSIN/PTSOUT) plus the printer/GDOS variant's reduced 3-array set
+# (GCONTRL/GINTIN/GINTOUT, no GPTSIN/GPTSOUT found in the same table),
+# not project-specific guesswork.
+_BUILTIN_BARE_ARRAYS = {
+    "contrl", "intin", "intout", "ptsin", "ptsout",
+    "gcontrl", "gintin", "gintout",
+}
 
 
 def _scan_declared_bare_arrays(lines: list[str]) -> set[str]:
