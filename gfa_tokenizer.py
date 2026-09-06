@@ -1466,11 +1466,24 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
     # dedicated case (rather than falling through _SIMPLE_KEYWORDS into
     # the generic expression tokenizer's bare-identifier-is-a-label
     # fallback) specifically so the target lands in the right group.
-    m = re.match(r"^GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
+    m = re.match(r"^GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:\((.*)\))?\s*$", body, re.IGNORECASE)
     if m:
-        idx = pool.get_or_add(11, m.group(1))
+        name, args = m.groups()
+        idx = pool.get_or_add(11, name)
         push16(out, 244)
         push16(out, idx)
+        if args is not None:
+            # "GOSUB name(args)" -- a parameterized-call GOSUB form.
+            # Ground truth: TRUCOLST.GFA's own many 'GOSUB
+            # zest_button(upper_x%,upper_y%,...)' sites all encode as
+            # [lcp 244][word idx] then a plain '(' token, the args as
+            # ordinary generic tokens, then a plain ')' token -- same
+            # tail shape DEFFN's with-params form uses above, just no
+            # trailing '=' (this is a statement, not an assignment).
+            out.append(PFT_TEXT_TO_CODE["("])
+            if args.strip():
+                out += tokenize_expr(args, 0, len(args), pool)
+            out.append(PFT_TEXT_TO_CODE[")"])
         _append_comment(out, comment)
         return bytes(out)
 
