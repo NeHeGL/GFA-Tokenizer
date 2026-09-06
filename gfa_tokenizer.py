@@ -2372,6 +2372,17 @@ MAGIC = b"GFA-BASIC3"
 _DIM_LINE_RE = re.compile(r"^\s*DIM\s+(.*)$", re.IGNORECASE)
 _DIM_BARE_NAME_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\(")
 
+# GFA-BASIC's five built-in VDI parameter-block arrays -- always
+# available bare, with no DIM required, unlike a user array. Confirmed
+# real: EASYMINT.LST's own 'CONTRL(0)=101' etc. (a companion project's
+# real-world archive) has no DIM anywhere in the file, and the official
+# compiler's own bundled test archive (hell.lst) independently lists
+# all five as recognized built-in names with their own numeric codes
+# (DATA 880,"PTSIN(" / 884,"PTSOUT(" / 888,"INTIN(" / 892,"INTOUT(") --
+# standard Atari ST GEM VDI communication arrays, not project-specific
+# guesswork.
+_BUILTIN_BARE_ARRAYS = {"contrl", "intin", "intout", "ptsin", "ptsout"}
+
 
 def _scan_declared_bare_arrays(lines: list[str]) -> set[str]:
     """Whole-file pre-scan for DIM'd array names with no explicit type
@@ -2395,7 +2406,7 @@ def _scan_declared_bare_arrays(lines: list[str]) -> set[str]:
     Good enough to find real bare array declarations without needing
     this file's full expression grammar just for a pre-pass.
     """
-    declared: set[str] = set()
+    declared: set[str] = set(_BUILTIN_BARE_ARRAYS)
     for line in lines:
         m = _DIM_LINE_RE.match(line)
         if not m:
