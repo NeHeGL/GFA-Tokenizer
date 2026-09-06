@@ -1870,7 +1870,15 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
     # lcp 248's own decode branch (240,244,248) does NOT auto-add "(" --
     # confirmed the hard way (round-tripped '@myproc(1,2)' came back
     # missing its open paren until this was added explicitly).
-    m = re.match(r"^@([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))?\s*$", body)
+    #
+    # Name may start with a digit ("@2030", confirmed real source --
+    # BEAN_ADV.LST, apparently a numeric procedure "name" carried over
+    # from an old line-numbered BASIC program). Safe to widen only here,
+    # unlike a bare identifier elsewhere (which could never legitimately
+    # start with a digit): '@' is a unique, unambiguous marker that only
+    # ever means "direct procedure/function call", so there's no risk of
+    # this colliding with a numeric literal or any other construct.
+    m = re.match(r"^@([A-Za-z0-9_][A-Za-z0-9_.$]*)\s*(\((.*)\))?\s*$", body)
     if m:
         name = m.group(1)
         ptype = 15 if name.endswith("$") else 11
