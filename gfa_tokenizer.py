@@ -183,7 +183,11 @@ PFT_CODE_OVERRIDE: dict[str, int] = {
 #     guessing further; see the companion GFA Decompiler project's
 #     memory (project_gfa_pft_duplicate_codes) for the investigation.
 #   ')' at 32, 51 -- '(' at 35, 157 -- ',' at 33, 156 (plain punctuation!)
-#   '=' at 19, 27, 69 (a third '=' beyond the numeric/string comparison pair)
+#   '=' at 19, 27, 69 (a third '=' beyond the numeric/string comparison
+#     pair) -- 69 CONFIRMED as the plain assignment '=' (DEFFN's own
+#     matcher hardcodes it directly rather than going through
+#     PFT_TEXT_TO_CODE's ambiguous default; see that matcher's own
+#     comment). 19 and 27 remain unconfirmed comparison-operator forms.
 #   'AT(' at 89, 122; 'INPUT$(' at 94, 95; 'ROUND(' at 112, 113
 #   'BIN$(' at 115, 116; 'MIN(' at 117, 118; 'MAX(' at 119, 120
 #   'STRING$(' at 129, 130; 'STR$(' at 190, 191, 192 (three-way!)
@@ -218,14 +222,18 @@ def push16(buf: bytearray, val: int) -> None:
 
 
 def push32(buf: bytearray, val: int) -> None:
-    # Masked to the raw 32-bit pattern rather than packed signed: GFA's
-    # own compiler has the same behavior for hex/octal/binary literals
-    # whose value needs the top bit (e.g. &HFFFFFFFF) -- it stores the
-    # bit pattern, and its OWN detokenizer reads it back as a signed int,
-    # rendering "&H-1" instead of "&HFFFFFFFF" (confirmed directly
-    # against ground truth: default5.gfa's own bytes for exactly this
-    # case). Masking here just avoids a struct.error for the same values
-    # the real compiler already round-trips this same lossy way.
+    # Masked to the raw 32-bit bit pattern rather than packed signed: a
+    # hex/octal/binary literal needing the top bit (e.g. &HFFFFFFFF) is
+    # stored as that literal 32-bit pattern, same as the real compiler.
+    # (Earlier revision of this comment claimed the real detokenizer
+    # reads this back as a signed int, rendering "&H-1" -- that was a
+    # misreading of a bug in the companion Detokenizer project's OWN
+    # decode path, since fixed there; the real GFA-BASIC editor, gfalist
+    # (an independent, unrelated implementation), and this project's own
+    # Detokenizer post-fix all decode default5.gfa's &HFFFFFFFF correctly.
+    # The masking itself was never wrong -- it's still exactly what the
+    # real compiler's own bytes for this construct look like -- only the
+    # justification citing "&H-1" as correct was.)
     buf += struct.pack(">I", val & 0xFFFFFFFF)
 
 
@@ -1100,12 +1108,35 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
     # name resolves through the same function-name group (type 14, or 15
     # if it ends in '$') that "> FUNCTION" declarations use -- confirmed
     # by the shared type semantics, not a separate ground-truth sample --
-    # followed by the params as generic tokens, the combined ")=" token
-    # (pft 57, same one array-element assignment uses), then the body
-    # expression.
+    # followed by the params as generic tokens, a plain ")" token, a
+    # plain "=" token, then the body expression.
+    #
+    # Ground truth: DIR_BAUM.GFA's own 'DEFFN fsfirst(adr_dateiname%,
+    # attribut%)=GEMDOS(...)' encodes the tail after the params as
+    # SEPARATE ")" (pft 32) and "=" (pft 69) tokens -- NOT the combined
+    # ")=" token (pft 57) array-element assignment uses, despite the
+    # visual resemblance. An earlier revision of this matcher used pft
+    # 57 here based on that resemblance alone ("confirmed by the shared
+    # type semantics, not a separate ground-truth sample" -- its own
+    # words); this was wrong, caught by finally tracing real bytes.
+    #
+    # The manual documents params as optional ("DEFFN func[(x1,x2,...)]
+    # =expression"), and real source confirms a genuinely paren-less form
+    # exists (not just empty parens): the same file's 'DEFFN
+    # fsnext=GEMDOS(&H4F)' (no '(' at all in source) encodes as
+    # [lcp 228][name-ref]["="][value expression] -- no '(' or ')' token
+    # at all, just the bare "=". Matched as a separate case rather than
+    # making the parens optional in one regex, since the two forms are
+    # genuinely different byte shapes, not just an empty-vs-nonempty
+    # params list.
     m = re.match(r"^DEFFN\s+([A-Za-z_][A-Za-z0-9_.]*\$?)\((.*)\)=(.*)$", body, re.IGNORECASE)
-    if m:
-        fname, params, value_expr = m.groups()
+    m_bare = None if m else re.match(r"^DEFFN\s+([A-Za-z_][A-Za-z0-9_.]*\$?)=(.*)$", body, re.IGNORECASE)
+    if m or m_bare:
+        if m:
+            fname, params, value_expr = m.groups()
+        else:
+            fname, value_expr = m_bare.groups()
+            params = None
         ftype = 15 if fname.endswith("$") else 14
         # resolve_var appends GFAVST[type_] ("$" for type 15) after the
         # pool name automatically -- storing it WITH the sigil already
@@ -1114,15 +1145,67 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
         push16(out, 228)
         out.append(240 + ftype)
         push16(out, idx)
-        # lcp=228 isn't special-cased in the decoder at all (falls
-        # straight into the generic stream after "DEFFN "), so unlike
-        # "> PROCEDURE" (lcp 216/24, which auto-synthesizes "(" on
-        # decode), the "(" has to be an explicit token here -- same
-        # fix as "> FUNCTION" (lcp 1796) above.
-        out.append(PFT_TEXT_TO_CODE["("])
-        if params.strip():
-            out += tokenize_expr(params, 0, len(params), pool)
-        out.append(PFT_TEXT_TO_CODE[")="])
+        if params is not None:
+            # lcp=228 isn't special-cased in the decoder at all (falls
+            # straight into the generic stream after "DEFFN "), so unlike
+            # "> PROCEDURE" (lcp 216/24, which auto-synthesizes "(" on
+            # decode), the "(" has to be an explicit token here -- same
+            # fix as "> FUNCTION" (lcp 1796) above.
+            out.append(PFT_TEXT_TO_CODE["("])
+            if params.strip():
+                out += tokenize_expr(params, 0, len(params), pool)
+            out.append(PFT_TEXT_TO_CODE[")"])
+        # pft 69, not PFT_TEXT_TO_CODE["="] (which resolves to 19, the
+        # first of three real, distinct opcodes that all render as "="
+        # -- see PFT_CODE_OVERRIDE's own docstring). Confirmed directly:
+        # DIR_BAUM.GFA's real bytes for both DEFFN forms use 69 here.
+        #
+        # NOT yet byte-identical past this point: the GEMDOS(...) call in
+        # the value expression differs from DIR_BAUM.GFA's real bytes by
+        # one filler byte inside its own literal-argument encoding (0xCB
+        # vs this tool's 0xCA) -- round-trips correctly through this
+        # project's own Tokenizer/Detokenizer pair either way, but per
+        # this project's own README, "the real editor's LOAD validation
+        # is strict about matching its own tokenizer byte-for-byte", so
+        # this specific value could still matter there. Appears to be a
+        # pre-existing, DEFFN-unrelated quirk in how a literal filler
+        # byte gets chosen for a GEMDOS(...) call's own comma-separated
+        # arguments generally, not something this fix touches -- flagged
+        # rather than chased further here.
+        out.append(69)
+        out += tokenize_expr(value_expr, 0, len(value_expr), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # "*var%=expr" -- pre-3.0-era pointer-dereference write (the manual's
+    # ARRPTR()/'*' address-of operator, used here as an lvalue: write
+    # THROUGH the value var% holds as a pointer, not to var% itself).
+    # GFALCT[122] (lcp 488) is literally the text '*', which the generic
+    # header-keyword-text mechanism already emits for free -- the rest is
+    # just [var-ref]['='][value expr], the same tail DEFFN above uses.
+    #
+    # Ground truth: DIR_BAUM.GFA's own '*adr_name%=name$' encodes as
+    # [lcp 488]['%'-type var-ref for adr_name%][pft 69 "="][$-type var-ref
+    # for name$]. Only the '%' (type 2) form is confirmed -- GFALCT also
+    # has a second, unconfirmed '*'-text lcp (484, one type-slot below
+    # 488 in what looks like the same per-sigil-type spacing this
+    # project's other statement families use) that may cover a different
+    # sigil; not guessed at here since there's no ground truth for it.
+    m = re.match(r"^\*([A-Za-z_][A-Za-z0-9_.]*)%=(.*)$", body)
+    if m:
+        name, value_expr = m.groups()
+        idx = pool.get_or_add(2, name)
+        push16(out, 488)
+        # Byte-form when it fits, same as every other var-ref site (see
+        # tokenize_expr's own comment on this) -- confirmed here too:
+        # DIR_BAUM.GFA's 'adr_name%' (pool index 9) used the byte form.
+        if idx < 256:
+            out.append(224 + 2)
+            out.append(idx)
+        else:
+            out.append(240 + 2)
+            push16(out, idx)
+        out.append(69)
         out += tokenize_expr(value_expr, 0, len(value_expr), pool)
         _append_comment(out, comment)
         return bytes(out)
