@@ -1011,11 +1011,17 @@ def _split_trailing_comment(text: str) -> tuple[str, str | None]:
     return text, None
 
 
-def encode_line(text: str, pool: IdentPool) -> bytes:
+def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozenset()) -> bytes:
     """Encodes one source line's CONTENT bytes (no outer 2-byte size
     prefix -- the caller adds that). Returns b'' for a blank line (encoded
     by the caller as a bare REM, matching what real files contain for
     blank editor lines).
+
+    declared_arrays: lowercased names DIM'd with no explicit suffix
+    anywhere in the file (see tokenize_source's own pre-scan) -- used to
+    recognize bare array-element assignment ('arr(i)=5' with no sigil)
+    without guessing at every bare 'name(...)=...' being an array. See
+    that matcher's own comment for why a blanket rule isn't safe.
     """
     stripped = text.strip()
     body = stripped
@@ -1712,6 +1718,36 @@ def encode_line(text: str, pool: IdentPool) -> bytes:
             _append_comment(out, comment)
             return bytes(out)
 
+    # Bare array-element assignment ('arr(i)=5', no sigil at all) -- Float
+    # is the documented default type, same reasoning as bare scalars
+    # above, so this is type 4 ("#(", ARRAY_ASSIGN_LCP's own entry for
+    # it), same shape as the sigil-explicit form just above.
+    #
+    # Deliberately gated on declared_arrays (populated by a whole-file
+    # DIM pre-scan in tokenize_source) rather than matching ANY bare
+    # 'name(...)=...' -- a blanket rule would make this fire on
+    # OB_STATE(tree,obj)=value and friends (real syntax with a genuinely
+    # different meaning, already handled by its own dedicated matcher
+    # above and confirmed real via the manual) whenever this matcher
+    # happened to run first, and there's no way to tell "known array"
+    # from "some other bare-name(...)=... construct" by shape alone.
+    # Only a name actually DIM'd bare earlier in the file is treated as
+    # an array here. Confirmed real: MOLMASSE.LST's own 'DIM
+    # atomgewicht(69)' then later 'gewicht(atomanzahl&)=atomgewicht
+    # (stelle&)*menge&'.
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_.]*)\((.*?)\)=(.*)$", body)
+    if m and m.group(1).lower() in declared_arrays:
+        name, index_expr, rhs = m.groups()
+        lcp = ARRAY_ASSIGN_LCP[4]
+        idx = pool.get_or_add(4, name)
+        push16(out, lcp)
+        push16(out, idx)
+        out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
+        out.append(PFT_TEXT_TO_CODE[")="])
+        out += tokenize_expr(rhs, 0, len(rhs), pool)
+        _append_comment(out, comment)
+        return bytes(out)
+
     m = re.match(r"^LET\s+", body, re.IGNORECASE)
     if m:
         let_rest = body[m.end() :]
@@ -2265,13 +2301,50 @@ END_OF_PROGRAM_LCP = 180
 MAGIC = b"GFA-BASIC3"
 
 
+_DIM_LINE_RE = re.compile(r"^\s*DIM\s+(.*)$", re.IGNORECASE)
+_DIM_BARE_NAME_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\(")
+
+
+def _scan_declared_bare_arrays(lines: list[str]) -> set[str]:
+    """Whole-file pre-scan for DIM'd array names with no explicit type
+    suffix -- used to gate bare array-element assignment recognition (see
+    encode_line's own comment on why a blanket 'any bare name(...)=...'
+    rule isn't safe). Deliberately whole-file rather than only-names-
+    seen-so-far: a PROCEDURE body can reference an array DIM'd later in
+    the file (or in an outer scope encountered after it in source order),
+    and this pre-scan doesn't need to be precise about declaration
+    order -- it only needs to avoid false positives on names that are
+    genuinely never DIM'd bare anywhere.
+
+    Deliberately simple substring/regex scanning, not full statement
+    parsing: a DIM line's own comma-separated entries are each either
+    'name(' (bare -- what this collects) or 'name<sigil>(' (explicit
+    suffix, already handled by the sigil-explicit matcher). The name
+    pattern's own character class ([A-Za-z0-9_.]) can't include a sigil
+    character, so it naturally can't match through to the '(' for a
+    suffixed entry ('atomgewicht#(' has no name+'(' substring at all,
+    since '#' breaks the match) -- no separate suffix check needed.
+    Good enough to find real bare array declarations without needing
+    this file's full expression grammar just for a pre-pass.
+    """
+    declared: set[str] = set()
+    for line in lines:
+        m = _DIM_LINE_RE.match(line)
+        if not m:
+            continue
+        for nm in _DIM_BARE_NAME_RE.finditer(m.group(1)):
+            declared.add(nm.group(1).lower())
+    return declared
+
+
 def tokenize_source(text: str) -> bytes:
     pool = IdentPool()
     lines = text.splitlines()
+    declared_arrays = _scan_declared_bare_arrays(lines)
     encoded: list[bytes] = []
     for line in lines:
         try:
-            content = encode_line(line, pool)
+            content = encode_line(line, pool, declared_arrays)
         except GfaTokenizeError as exc:
             raise GfaTokenizeError(f"line {len(encoded) + 1}: {exc}") from exc
         encoded.append(content)
