@@ -1754,7 +1754,7 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
             return bytes(out)
 
     m = re.match(
-        r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\((.*?)\)=(.*)$",
+        r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\((.*?)\)\s*=(.*)$",
         body,
     )
     if m and (m.group(2) + "(") in SUFFIX_TO_TYPE:
@@ -1788,7 +1788,7 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     # an array here. Confirmed real: MOLMASSE.LST's own 'DIM
     # atomgewicht(69)' then later 'gewicht(atomanzahl&)=atomgewicht
     # (stelle&)*menge&'.
-    m = re.match(r"^([A-Za-z_][A-Za-z0-9_.]*)\((.*?)\)=(.*)$", body)
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_.]*)\((.*?)\)\s*=(.*)$", body)
     if m and m.group(1).lower() in declared_arrays:
         name, index_expr, rhs = m.groups()
         lcp = ARRAY_ASSIGN_LCP[4]
@@ -1804,7 +1804,7 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     m = re.match(r"^LET\s+", body, re.IGNORECASE)
     if m:
         let_rest = body[m.end() :]
-        arr_m = re.match(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\((.*?)\)=(.*)$", let_rest)
+        arr_m = re.match(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\((.*?)\)\s*=(.*)$", let_rest)
         if arr_m and (arr_m.group(2) + "(") in SUFFIX_TO_TYPE:
             name, sigil, index_expr, rhs = arr_m.groups()
             type_ = SUFFIX_TO_TYPE[sigil + "("]
@@ -1818,6 +1818,21 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                 out += tokenize_expr(rhs, 0, len(rhs), pool)
                 _append_comment(out, comment)
                 return bytes(out)
+        # "LET arr(i)=expr", no sigil -- same DIM-pre-scan gating as the
+        # non-LET bare array form above. Confirmed real: SPRIT_ED.LST's
+        # own 'Let Sprite_foreground(X%,Y%)=1'.
+        bare_arr_m = re.match(r"^([A-Za-z_][A-Za-z0-9_.]*)\((.*?)\)\s*=(.*)$", let_rest)
+        if bare_arr_m and bare_arr_m.group(1).lower() in declared_arrays:
+            name, index_expr, rhs = bare_arr_m.groups()
+            lcp = LET_ARRAY_ASSIGN_LCP[4]
+            idx = pool.get_or_add(4, name)
+            push16(out, lcp)
+            push16(out, idx)
+            out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
+            out.append(PFT_TEXT_TO_CODE[")="])
+            out += tokenize_expr(rhs, 0, len(rhs), pool)
+            _append_comment(out, comment)
+            return bytes(out)
         am = _ASSIGN_RE.match(let_rest)
         if am and (not am.group(2) or am.group(2) in SUFFIX_TO_TYPE):
             name, sigil = am.group(1), am.group(2)
