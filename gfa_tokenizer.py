@@ -445,6 +445,18 @@ def _try_match_keyword(text: str, pos: int, table: dict[str, int], max_len: int)
     return best
 
 
+# Bare (unsuffixed) array names DIM'd earlier in the file currently
+# being encoded -- read by tokenize_expr (see its own use, right at the
+# top of its main dispatch loop) to resolve a bare array READ the same
+# way encode_line's own dedicated matchers already resolve a bare array
+# WRITE. Set once per encode_line() call rather than threaded as a
+# parameter through tokenize_expr's ~55 call sites -- this file only
+# ever encodes one line at a time, single-threaded, so a module-level
+# variable scoped to "the line currently being encoded" is safe and
+# far less invasive than a signature change everywhere.
+_CURRENT_DECLARED_ARRAYS: frozenset[str] = frozenset()
+
+
 def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False) -> bytes:
     out = bytearray()
     # Tracks whether the most recently emitted atom (literal, var-ref, or
@@ -695,6 +707,47 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 just_saw_value = False
                 last_was_string = False
                 continue
+        # A bare (unsuffixed) name immediately followed by '(' that's a
+        # KNOWN declared array (DIM'd bare earlier in the file) is read
+        # here as a genuine array reference, not the plain scalar
+        # parse_var_ref alone would produce. parse_var_ref deliberately
+        # never resolves a bare 'name(' as an array on its own (see its
+        # own docstring: doing so would make 'SIN(x)' lose to a same-
+        # shaped bare-array match) -- but once declared_arrays confirms
+        # this SPECIFIC name is the user's own array, there's no such
+        # ambiguity to worry about. Without this, every READ of a bare
+        # array (anywhere in an expression -- not just its own
+        # assignment, which encode_line's dedicated matcher already
+        # handles separately) silently fell back to a bare SCALAR var-
+        # ref for the name, immediately followed by an ordinary '(',
+        # literal, ')' as unrelated tokens -- which still decodes to the
+        # same-looking text on a round-trip (concatenation hides the
+        # structural difference) but isn't a real array reference at
+        # all. Confirmed real, and a genuine bug: BALL.LST's own bare
+        # arrays (x/y/x1/x2/... etc, see the DIM fix above) are read
+        # throughout the file (e.g. inside @put_sprite(...) calls);
+        # reloading our tokenized output in the real GFA-BASIC editor
+        # and running it crashed hard (a real 68000 exception, not a
+        # graceful BASIC error) -- isolated with a minimal 'DIM
+        # arr(5)' + 'PRINT arr(0)' test file that crashed the same way,
+        # while a 'DIM arr(5)' + 'arr(0)=1' write-only test (going
+        # through the already-correct dedicated assignment matcher, not
+        # this generic expression path) ran fine.
+        nm = _NAME_RE.match(text, pos)
+        if nm and text[nm.end() : nm.end() + 1] == "(" and nm.group(0).lower() in _CURRENT_DECLARED_ARRAYS:
+            idx = pool.get_or_add(4, nm.group(0))
+            if idx < 256:
+                out.append(224 + 4)
+                out.append(idx)
+            else:
+                out.append(240 + 4)
+                push16(out, idx)
+            pos = nm.end() + 1
+            array_open = True
+            zero_filler = True
+            last_was_string = False
+            just_saw_value = True
+            continue
         # Try a variable/array reference AND both keyword tables, then take
         # whichever match consumes the MOST text, with keywords winning a
         # tie. A reserved word always wins a tie because the real compiler
@@ -1104,6 +1157,8 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     without guessing at every bare 'name(...)=...' being an array. See
     that matcher's own comment for why a blanket rule isn't safe.
     """
+    global _CURRENT_DECLARED_ARRAYS
+    _CURRENT_DECLARED_ARRAYS = frozenset(declared_arrays)
     stripped = text.strip()
     body = stripped
     comment: tuple[int, str] | None = None
