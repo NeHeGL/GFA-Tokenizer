@@ -160,14 +160,23 @@ WORD_OPERATORS = {"AND", "OR", "XOR", "IMP", "EQV", "MOD", "DIV", "NOT"}
 # string-returning function). Confirmed via a real GFA-BASIC -s debug
 # compile (RTLIBTS2): 'd$=LEFT$(c$,3)' compiles to code 59 (0x3b), never
 # PFT_TEXT_TO_CODE's default (58, the first/lower occurrence found by
-# its dedup) -- and 'h$=RIGHT$(c$,3)' likewise uses 61, not 60. What
-# triggers the OTHER member of each pair isn't known yet (not exercised
-# by any test program so far) -- MID$( has the identical duplicate
-# shape (62/63) but is deliberately left alone here since there's no
-# ground truth yet for which of its two codes a plain read use needs.
+# its dedup) -- and 'h$=RIGHT$(c$,3)' likewise uses 61, not 60.
+#
+# MID$( has the identical duplicate shape (62/63) -- previously left
+# alone here since there was no ground truth yet for which of its two
+# codes a plain read use needs, but by direct analogy with LEFT$/
+# RIGHT$ (both needing the SECOND/higher code, never the first) 63 is
+# now used here too. Confirmed real and a genuine crash fix: BALL.LST's
+# own 'RANDOMIZE VAL(MID$(TIME$,7,8))' -- using the default (62)
+# tokenized to clean-looking text and passed the real editor's own load/
+# save/Test checks, but crashed hard (a real 68000 exception) on both
+# Run and Compile. Isolated to this exact line via bisection (every
+# other statement type between the array declarations and here was
+# independently confirmed clean first).
 PFT_CODE_OVERRIDE: dict[str, int] = {
     "LEFT$(": 59,
     "RIGHT$(": 61,
+    "MID$(": 63,
 }
 
 # Full inventory of every OTHER GFAPFT display-text collision, found by
