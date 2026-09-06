@@ -2062,6 +2062,12 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     # statement shaped like this one now correctly falls through to the
     # "unrecognized statement" error below rather than being silently
     # misencoded as a bare procedure call.
+    #
+    # The depth-tracking loop itself also has to skip over string-literal
+    # contents rather than counting every raw '(' / ')' character: a call
+    # like 'scrolle("I love cubes :)")' has a ')' inside its own quoted
+    # argument, which a naive scan sees as the closing paren -- confirmed
+    # real via FRGTNBTS.LST's own line of exactly that shape.
     m = None
     head = re.match(r"^([A-Za-z_][A-Za-z0-9_.$]*)\s*(\()?", body)
     if head and head.group(2) is None and body[head.end(1):].strip() == "":
@@ -2069,14 +2075,23 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     elif head and head.group(2) is not None:
         depth = 0
         close = None
-        for k in range(head.end(2) - 1, len(body)):
-            if body[k] == "(":
+        in_string = False
+        k = head.end(2) - 1
+        while k < len(body):
+            ch = body[k]
+            if in_string:
+                if ch == '"':
+                    in_string = False
+            elif ch == '"':
+                in_string = True
+            elif ch == "(":
                 depth += 1
-            elif body[k] == ")":
+            elif ch == ")":
                 depth -= 1
                 if depth == 0:
                     close = k
                     break
+            k += 1
         if close is not None and body[close + 1 :].strip() == "":
             m = re.match(r"^([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))\s*$", body[: close + 1])
     if m:
@@ -2474,7 +2489,26 @@ def tokenize_source(text: str) -> bytes:
     if cut != -1:
         text = text[:cut]
     pool = IdentPool()
-    lines = text.splitlines()
+    # NOT text.splitlines() -- it breaks on every Unicode line-boundary
+    # code point (NEL U+0085, LS U+2028, PS U+2029, etc.), and this file
+    # is read as latin1, so byte 0x85 (an accented character in the
+    # Atari ST charset -- e.g. French "à") decodes straight to U+0085 and
+    # gets treated as a mid-comment line break. Confirmed real:
+    # FRGTNBTS.LST's own "Jusqu'à 70 étoiles..." comment (the "à" is
+    # 0x85) was silently split into two fake lines, corrupting the
+    # comment and desyncing every subsequent line number in error
+    # messages. Splitting only on the format's actual CRLF/LF convention
+    # avoids this.
+    norm = text.replace("\r\n", "\n")
+    if norm == "":
+        lines: list[str] = []
+    else:
+        lines = norm.split("\n")
+        if norm.endswith("\n"):
+            # A trailing newline shouldn't produce a phantom extra blank
+            # line -- matches str.splitlines()'s own behavior, which
+            # text.split("\n") doesn't share.
+            lines.pop()
     declared_arrays = _scan_declared_bare_arrays(lines)
     encoded: list[bytes] = []
     for line in lines:
@@ -2583,7 +2617,7 @@ def tokenize_file(src: Path, dest: Path) -> int:
     text = src.read_text(encoding="latin1")
     data = tokenize_source(text)
     dest.write_bytes(data)
-    return len(text.splitlines())
+    return len(text.replace("\r\n", "\n").split("\n"))
 
 
 # ---------------------------------------------------------------------------
@@ -2682,7 +2716,8 @@ def run_gui() -> None:
                 text = src_full_path.read_text(encoding="latin1")
                 dest_full_path = src_full_path.with_suffix(".gfa")
                 window["-SRC-"].update(src_full_path.name)
-                window["-INFO-"].update(f"{len(text.splitlines())} lines  |  {src_full_path.stat().st_size:,} bytes")
+                line_count = len(text.replace("\r\n", "\n").split("\n"))
+                window["-INFO-"].update(f"{line_count} lines  |  {src_full_path.stat().st_size:,} bytes")
                 window["-DEST-"].update(dest_full_path.name)
                 window["-CONVERT-"].update(disabled=False)
                 window["-STATUS-"].update("")
