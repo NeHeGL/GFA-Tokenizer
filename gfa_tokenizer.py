@@ -931,6 +931,14 @@ ARRAY_ARITH_LCP = {
 # emits an explicit STEP token + value.
 FOR_STEP_EXPR_LCP = {0: 84, 2: 96, 8: 108, 9: 120}
 FOR_NO_STEP_LCP = {t: lcp - 8 for t, lcp in FOR_STEP_EXPR_LCP.items()}
+# "FOR var=start DOWNTO end" -- each type's 3rd sub-variant, sitting
+# exactly between its no-step and step-expr siblings (base, base+4,
+# base+8). Confirmed directly: msx_emul.GFA's own
+# 'FOR page&=3 DOWNTO 0' uses lcp 104 == FOR_NO_STEP_LCP[8] + 4. DOWNTO
+# itself is a plain GFAPFT token (73, ' DOWNTO ') emitted in the same
+# stream position "TO"/"STEP" use -- not special-cased in the decoder,
+# same generic keyword-text mechanism as every other operator.
+FOR_DOWNTO_LCP = {t: lcp + 4 for t, lcp in FOR_NO_STEP_LCP.items()}
 # NEXT var, one representative lcp per type (of that type's own 3 sub-
 # variants, whose exact distinguishing condition isn't confirmed).
 NEXT_LCP = {0: 124, 2: 136, 8: 148, 9: 160}
@@ -1621,6 +1629,24 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
             if step_expr is not None:
                 out.append(PFT_TEXT_TO_CODE["STEP"])
                 out += tokenize_expr(step_expr, 0, len(step_expr), pool)
+            _append_comment(out, comment)
+            return bytes(out)
+
+    m = re.match(
+        r"^FOR\s+([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?=(.*?)\s+DOWNTO\s+(.*)$",
+        body, re.IGNORECASE,
+    )
+    if m:
+        name, sigil, start_expr, to_expr = m.groups()
+        type_ = SUFFIX_TO_TYPE.get(sigil) if sigil else 0
+        lcp = FOR_DOWNTO_LCP.get(type_) if type_ is not None else None
+        if lcp is not None:
+            idx = pool.get_or_add(type_, name)
+            push16(out, lcp)
+            push16(out, idx)
+            out += tokenize_expr(start_expr, 0, len(start_expr), pool, array_open=True)
+            out.append(PFT_TEXT_TO_CODE["DOWNTO"])
+            out += tokenize_expr(to_expr, 0, len(to_expr), pool)
             _append_comment(out, comment)
             return bytes(out)
 
