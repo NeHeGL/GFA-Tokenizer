@@ -1085,7 +1085,25 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
             if len(out) & 1:
                 out.append(0)
             return bytes(out)
+        # A genuinely blank line (no leading "'" at all) is otherwise
+        # identical to a bare "'" -- both are an empty-text lcp=460
+        # REM-type line -- and MUST carry the same 0x0D raw-passthrough
+        # terminator + even-byte pad that every other REM/'/DATA branch
+        # emits. Omitting it here was a real, confirmed bug: the real
+        # editor's raw-passthrough reader for this line type keeps
+        # consuming bytes past the missing terminator, silently
+        # swallowing the following line(s)' own length-prefix and
+        # content as garbage "comment" text until it happens to hit an
+        # unrelated 0x0D elsewhere in the stream. Confirmed real via
+        # BALL.LST's own several genuinely-blank (whitespace-only, no
+        # "'") lines -- reloading our tokenized output in the real
+        # GFA-BASIC editor and resaving showed corrupted binary-garbage
+        # comment lines exactly at each one, verified against the same
+        # editor's own resave of the real ground-truth BALL.GFA.
         push16(out, 460)
+        out.append(0x0D)
+        if len(out) & 1:
+            out.append(0)
         return bytes(out)
 
     if body.startswith("'") or body[:3].upper() == "REM":
