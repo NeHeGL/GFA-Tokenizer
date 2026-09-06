@@ -2347,6 +2347,17 @@ def _scan_declared_bare_arrays(lines: list[str]) -> set[str]:
 
 
 def tokenize_source(text: str) -> bytes:
+    # A trailing 0x1A (Ctrl-Z) is the classic DOS/CP-M text-file EOF
+    # marker, not GFA-BASIC syntax -- confirmed real: FCOMP2.LST and
+    # INSTALLR.LST (a companion project's own real-world archive) both
+    # end their last real line's CRLF with a lone 0x1A byte, which
+    # previously fell through to "unrecognized statement" as if it were
+    # source text. DOS text-mode reads stop at the first Ctrl-Z, so
+    # truncating there (not just stripping trailing whitespace) matches
+    # what the real editor's own file-load would have seen.
+    cut = text.find("\x1a")
+    if cut != -1:
+        text = text[:cut]
     pool = IdentPool()
     lines = text.splitlines()
     declared_arrays = _scan_declared_bare_arrays(lines)
