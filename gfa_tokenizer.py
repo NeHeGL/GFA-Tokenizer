@@ -1029,8 +1029,17 @@ def _split_trailing_comment(text: str) -> tuple[str, str | None]:
         # A sigil attaches to a real IDENTIFIER (starts with a letter),
         # never to a bare numeric literal ('0!' is not a sigil use even
         # though '0' is alnum) -- so require an actual identifier ending
-        # right at this position, not just any alnum character.
-        looks_like_sigil = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", text[:i]) is not None
+        # right at this position, not just any alnum character. A hex/
+        # octal/binary literal's digit run (e.g. the "H8B" of "&H8B")
+        # also matches that same alnum-run shape, so it has to be
+        # excluded explicitly too -- confirmed real: MSX_EMUL.LST's own
+        # 'CASE &H98 TO &H9B,&H88 TO &H8B! VDP Ports' has an unspaced
+        # trailing comment glued directly onto a hex literal, which was
+        # being misdetected as a sigil use on a variable named "h8b".
+        looks_like_sigil = (
+            re.search(r"[A-Za-z_][A-Za-z0-9_]*$", text[:i]) is not None
+            and re.search(r"&[HOX][0-9A-Fa-f]*$", text[:i], re.IGNORECASE) is None
+        )
         if looks_like_sigil:
             continue
         return text[:i].rstrip(" "), (len(text[:i]) - len(text[:i].rstrip(" ")), text[i + 1 :])
