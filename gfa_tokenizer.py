@@ -334,6 +334,7 @@ def parse_var_ref(text: str, pos: int) -> tuple[int, str, bool, int] | None:
     return 0, name, False, p
 
 
+
 # ---------------------------------------------------------------------------
 # Packed-float encoding (reverse of gfa_float_to_double): the real 64-bit
 # IEEE double, sign bit dropped (GFA's packed format only represents
@@ -953,7 +954,15 @@ NEXT_LCP = {0: 124, 2: 136, 8: 148, 9: 160}
 # float assignment, same as if '#' had been written explicitly. Callers
 # must treat a missing group(2) as type 0, not skip the statement --
 # see the two call sites below.
-_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?=(?!=)")
+#
+# Whitespace before '=' is also tolerated (BALL.LST's own
+# 'nb_balls        = playmode+1', column-aligned source formatting) --
+# confirmed inconsequential to the real token bytes: BALL.GFA's own
+# compiled form for this exact line has no space at all
+# ('nb_balls#=playmode#+1'), so the source whitespace is purely
+# cosmetic and safely discarded, not something the real tokenizer ever
+# preserved in the first place.
+_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])?\s*=(?!=)")
 
 _INT_RHS_RE = re.compile(r"^(-?\d+)\s*$")
 
@@ -986,7 +995,16 @@ def _try_bare_int_literal_rhs(rhs: str) -> bytes | None:
     out.append(200)
     push32(out, int(m.group(1)))
     return bytes(out)
-_LABEL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*):\s*$")
+# Name may start with a digit (BEAN_ADV.LST's own numeric-named
+# 'PROCEDURE'/'@name'/'GOSUB' targets have a label-declaration sibling
+# too: '1730:'), matching this project's other "old line-numbered
+# BASIC" fixes. Declaration position is unambiguous (line starts with
+# an identifier-shaped token immediately followed by ':' and nothing
+# else), unlike a bare number appearing as a GOTO/GOSUB *target*
+# reference inside the shared generic expression tokenizer, which is
+# genuinely ambiguous against a plain numeric literal there and is
+# deliberately NOT widened here.
+_LABEL_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.]*):\s*$")
 _COMMENT_RE = re.compile(r"^\s*(!|REM\b)\s?(.*)$", re.IGNORECASE)
 _TRAILING_COMMENT_RE = re.compile(r"(?<!&)!(?!=)(.*)$")
 
