@@ -1119,6 +1119,59 @@ def _try_bare_int_literal_rhs(rhs: str) -> bytes | None:
     out.append(200)
     push32(out, int(m.group(1)))
     return bytes(out)
+
+
+def _append_v_h_data_end(out: bytearray, comment: tuple[int, str] | None) -> None:
+    """V~H=/_DATA='s own end-of-line sentinel+pad. CONFIRMED via real
+    ground truth (Hard_Drive/TESTING/VTILDE.PRG's 'V~H=-1' and
+    VTILDE2.PRG's 'V~H=100'/'V~H=0', all three independently) to use a
+    plain ZERO pad byte after the sentinel, not the repeated-sentinel pad
+    _append_comment's own no-comment branch uses for ordinary statements
+    (confirmed separately via RTLIBTS2 -- see that function's own
+    docstring). Comment handling isn't independently confirmed for this
+    statement type, so that case still defers to the shared, already-
+    confirmed _append_comment rather than guessing.
+    """
+    if comment is not None:
+        _append_comment(out, comment)
+        return
+    out.append(70)
+    if len(out) & 1:
+        out.append(0)
+
+
+def _v_h_data_rhs(rhs: str, pool: IdentPool) -> bytes:
+    """V~H=/_DATA='s own RHS encoding -- a THIRD, previously undocumented
+    odd+filler convention, distinct from both _try_bare_int_literal_rhs's
+    normal-assignment form (also pft 201, but with the pair's own even
+    code 200 as filler) and tokenize_expr's own 'was_first_token' branch
+    (also 200, meant for a narrower case -- an injected literal inside a
+    larger rewritten expression, not a genuine whole-RHS bare literal).
+    V~H=/_DATA= skip both of those paths entirely (never routing through
+    _try_bare_int_literal_rhs the way a normal 'var=literal' assignment
+    does), so a bare integer RHS here used to fall into tokenize_expr's
+    'was_first_token' branch and get the WRONG (200) filler -- and a
+    negative one fell into the entirely unrelated unary-minus/packed-
+    float path instead, having never been recognized as one combined
+    literal token at all.
+
+    CONFIRMED via a real Hatari compile (the companion GFA Decompiler
+    project's Hard_Drive/TESTING/VTILDE2.PRG, 'V~H=100'/'V~H=0') plus the
+    original VTILDE.PRG's own 'V~H=-1': all three encode as plain
+    [pft 201][0x00 filler][4-byte two's-complement value] -- zero filler,
+    not 200, and handling the sign directly in the 32-bit value rather
+    than via a separate unary-minus opcode.
+    """
+    m = _INT_RHS_RE.match(rhs)
+    if m:
+        out = bytearray()
+        out.append(201)
+        out.append(0)
+        push32(out, int(m.group(1)))
+        return bytes(out)
+    return tokenize_expr(rhs, 0, len(rhs), pool)
+
+
 # Name may start with a digit (BEAN_ADV.LST's own numeric-named
 # 'PROCEDURE'/'@name'/'GOSUB' targets have a label-declaration sibling
 # too: '1730:'), matching this project's other "old line-numbered
@@ -2069,15 +2122,15 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     if m:
         push16(out, 1624)
         rhs = m.group(1)
-        out += tokenize_expr(rhs, 0, len(rhs), pool)
-        _append_comment(out, comment)
+        out += _v_h_data_rhs(rhs, pool)
+        _append_v_h_data_end(out, comment)
         return bytes(out)
     m = re.match(r"^_DATA\s*=\s*(.*)$", body, re.IGNORECASE)
     if m:
         push16(out, 1692)
         rhs = m.group(1)
-        out += tokenize_expr(rhs, 0, len(rhs), pool)
-        _append_comment(out, comment)
+        out += _v_h_data_rhs(rhs, pool)
+        _append_v_h_data_end(out, comment)
         return bytes(out)
 
     # INLINE addr%,length -- reserves a `length`-byte area within the
