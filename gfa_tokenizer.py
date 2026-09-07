@@ -466,7 +466,7 @@ def _try_match_keyword(text: str, pos: int, table: dict[str, int], max_len: int)
 _CURRENT_DECLARED_ARRAYS: frozenset[str] = frozenset()
 
 
-def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False) -> bytes:
+def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False) -> bytes:
     out = bytearray()
     # Tracks whether the most recently emitted atom (literal, var-ref, or
     # builtin-function call) was string-typed -- used to pick the right
@@ -928,6 +928,31 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             continue
         else:
             type_, name, is_array, newpos = varref
+            if bare_word_is_label and not is_array and newpos == pos + len(name):
+                # parse_var_ref's "no sigil at all" branch defaults a
+                # bare word to a type-0 Float variable -- correct for a
+                # real expression, but GOTO/RESTORE/RESUME's target is
+                # never a variable, it's a label (a separate namespace
+                # with no sigil of its own). Confirmed against a real
+                # GFA-BASIC editor round-trip (FOO_TEST.LST/.GFA in the
+                # companion GFA Decompiler project's Hard_Drive/TESTING
+                # folder): a plain 'GOTO foo' must stay 'foo', not
+                # silently become 'foo#' the way the default-Float path
+                # renders it. Only fires when the caller has told us
+                # (bare_word_is_label) we're in one of those statements'
+                # own target position AND no explicit sigil was actually
+                # written (newpos==pos+len(name) -- an explicit 'foo#'
+                # still means what it says).
+                idx = pool.get_or_add(10, name)
+                if idx < 256:
+                    out.append(224 + 10)
+                    out.append(idx)
+                else:
+                    out.append(240 + 10)
+                    push16(out, idx)
+                pos = newpos
+                just_saw_value = True
+                continue
             idx = pool.get_or_add(type_, name)
             last_was_string = type_ in STRING_VST_TYPES
             just_saw_value = True
@@ -952,25 +977,16 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 array_open = True
                 zero_filler = True
             continue
-        # Last resort: a bare identifier with no sigil and no keyword
-        # match is a LABEL reference (GOTO/GOSUB/ON...GOTO targets --
-        # labels have no sigil of their own, so parse_var_ref never
-        # matches them).
-        wm = _NAME_RE.match(text, pos)
-        if wm:
-            label_name = wm.group(0)
-            idx = pool.get_or_add(10, label_name)
-            # Same byte-form-when-it-fits choice as the array/variable
-            # var-ref case above -- confirmed needed here too against a
-            # real GFA-BASIC editor's own tokenized 'RESTORE lbl'.
-            if idx < 256:
-                out.append(224 + 10)
-                out.append(idx)
-            else:
-                out.append(240 + 10)
-                push16(out, idx)
-            pos = wm.end()
-            continue
+        # This used to fall through to a "last resort: bare identifier is
+        # a LABEL reference" branch here, on the theory that parse_var_ref
+        # returns None for a sigil-less word and leaves it for this code
+        # to claim. That premise was wrong -- parse_var_ref's own "no
+        # sigil at all" default-Float rule (see its docstring) means
+        # varref is NEVER None for a word matching _NAME_RE, so this
+        # branch was actually dead code; the real fix is the
+        # bare_word_is_label check above, in the branch that actually
+        # runs. Nothing reaches this point except genuinely unmatchable
+        # text.
         raise GfaTokenizeError(f"can't tokenize {text[pos:pos+20]!r} at column {pos}")
     return bytes(out)
 
@@ -2141,6 +2157,26 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                 # this can't just go through the generic tokenize_expr
                 # call every other _SIMPLE_KEYWORDS statement uses.
                 out += _encode_dim_list(rest, pool)
+            elif lcp in _LABEL_TARGET_LCPS:
+                # GOTO/RESTORE/RESUME: their bare-word target is a LABEL
+                # (type 10), never a variable -- see tokenize_expr's own
+                # bare_word_is_label docstring for why this can't just be
+                # the plain fallthrough every other _SIMPLE_KEYWORDS
+                # statement uses. Confirmed real bug fixed here, not
+                # guessed: a real GFA-BASIC editor round-trip
+                # (Hard_Drive/TESTING/FOO_TEST.LST/.GFA in the companion
+                # GFA Decompiler project) showed 'GOTO foo' must stay
+                # 'foo', while this project's own tokenizer/detokenizer
+                # pair had been silently rendering it 'foo#' (the
+                # default-Float sigil) -- undetected until now because
+                # re-tokenizing 'foo#' produces the identical bytes,
+                # making the bug invisible to a same-tool round-trip
+                # check (only comparing against the real editor's own
+                # output caught it). RESUME's other two lcp variants
+                # (424/428) aren't in this set -- their own real-source
+                # trigger is still unconfirmed (see _SIMPLE_KEYWORDS'
+                # own comment), left untouched rather than guessed.
+                out += tokenize_expr(rest, 0, len(rest), pool, bare_word_is_label=True)
             else:
                 out += tokenize_expr(rest, 0, len(rest), pool)
         _append_comment(out, comment)
@@ -2311,6 +2347,14 @@ HEADER_SKIP4_LCP = {4, 12, 16, 20, 32, 48, 56, 60, 64, 172, 176, 196, 200, 204, 
 # keyword itself (no operand encoding beyond the generic expression that
 # may follow) -- built from GFALCT text where the lowest lcp sharing that
 # text is the plain/general-purpose form.
+# GOTO=232, RESTORE=236, RESUME=420 (see _SIMPLE_KEYWORDS below) -- the
+# three confirmed-real _SIMPLE_KEYWORDS statements whose bare-word
+# argument is a LABEL reference, not a variable. See the
+# bare_word_is_label call site's own comment for why this needs special
+# handling instead of the plain tokenize_expr(rest, ...) fallthrough
+# every other entry uses.
+_LABEL_TARGET_LCPS = {232, 236, 420}
+
 _SIMPLE_KEYWORDS = {
     "DO": 0, "LOOP": 4, "REPEAT": 8, "UNTIL": 12, "WHILE": 16, "WEND": 20,
     "IF": 32, "ENDIF": 36, "ENDFUNC": 44,
