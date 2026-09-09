@@ -1628,16 +1628,43 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     # text, the decoder doesn't special-case lcp 532/536/540 the way it
     # special-cases lcp=244 plain "GOSUB " -- it falls through to the
     # generic post-header token stream regardless, so the target must be
-    # encoded as an ordinary marker+index mid-expression reference (240+11
-    # + 16-bit pool index), same as the BUTTON/IBOX/OBOX forms below.
-    # Confirmed by round-trip: a bare index here decoded as garbage PFT
-    # bytes ("AND"/"OR"/...) instead of the target name.
+    # encoded as an ordinary marker+index mid-expression reference, same
+    # as the BUTTON/IBOX/OBOX forms below.
+    #
+    # Marker+index convention: the companion Detokenizer decodes
+    # pft 224-239 as "group (pft-224), 1-BYTE index" and pft 240-255 as
+    # "group (pft-240), 2-BYTE index" (gfa_detokenizer.py's own
+    # `elif 224 <= pft <= 239` / `elif 240 <= pft <= 255` branches) --
+    # two genuinely different reference widths, not interchangeable.
+    # This block used to always use the 240+group/2-byte form (same as
+    # plain "GOSUB name" elsewhere in this file, which IS confirmed
+    # correct for that construct via extensive separate ground truth).
+    # That was wrong for the ON-MENU-GOSUB family specifically: a real
+    # GFA-BASIC -s debug compile (MENUFNPS.PRG/.GFA, companion GFA
+    # Decompiler project, 2026-09-09) byte-diffed "ON MENU GOSUB
+    # menu_gosub_target" against this tokenizer's own output and showed
+    # the real file using marker 224+11 (0xEB) with a single index byte
+    # (0x00), not 240+11 (0xFB) with a two-byte index (0x0000) -- same
+    # final index value, different, and previously wrong, encoding
+    # width/marker. Confirmed by round-trip: a bare index with NO marker
+    # at all here decoded as garbage PFT bytes ("AND"/"OR"/...) instead
+    # of the target name -- that earlier finding is still valid, it just
+    # didn't distinguish 224 vs 240 since both are valid marker ranges
+    # and this construct's index (small, event-trap-table-sized) never
+    # happened to exceed 255 in whatever was tested before. Only the
+    # plain "ON MENU GOSUB" form has real-file confirmation so far; the
+    # MESSAGE/KEY/BUTTON/IBOX/OBOX variants below are changed the same
+    # way on the strength of being byte-for-byte structurally identical
+    # code (same author, same block, same unverified assumption) to the
+    # one now-confirmed case, but are NOT independently ground-truth-
+    # confirmed yet -- flag for re-verification if a real compile of any
+    # of those five ever becomes available.
     m = re.match(r"^ON\s+MENU\s+MESSAGE\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
     if m:
         idx = pool.get_or_add(11, m.group(1))
         push16(out, 536)
-        out.append(240 + 11)
-        push16(out, idx)
+        out.append(224 + 11)
+        out.append(idx & 0xFF)
         _append_comment(out, comment)
         return bytes(out)
 
@@ -1645,8 +1672,8 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     if m:
         idx = pool.get_or_add(11, m.group(1))
         push16(out, 540)
-        out.append(240 + 11)
-        push16(out, idx)
+        out.append(224 + 11)
+        out.append(idx & 0xFF)
         _append_comment(out, comment)
         return bytes(out)
 
@@ -1657,8 +1684,8 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
         push16(out, 544)
         out += tokenize_expr(args_expr, 0, len(args_expr), pool)
         out.append(PFT_TEXT_TO_CODE["GOSUB"])
-        out.append(240 + 11)
-        push16(out, idx)
+        out.append(224 + 11)
+        out.append(idx & 0xFF)
         _append_comment(out, comment)
         return bytes(out)
 
@@ -1669,8 +1696,8 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
         push16(out, 952)
         out += tokenize_expr(args_expr, 0, len(args_expr), pool)
         out.append(PFT_TEXT_TO_CODE["GOSUB"])
-        out.append(240 + 11)
-        push16(out, idx)
+        out.append(224 + 11)
+        out.append(idx & 0xFF)
         _append_comment(out, comment)
         return bytes(out)
 
@@ -1681,19 +1708,21 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
         push16(out, 956)
         out += tokenize_expr(args_expr, 0, len(args_expr), pool)
         out.append(PFT_TEXT_TO_CODE["GOSUB"])
-        out.append(240 + 11)
-        push16(out, idx)
+        out.append(224 + 11)
+        out.append(idx & 0xFF)
         _append_comment(out, comment)
         return bytes(out)
 
     # Plain "ON MENU GOSUB target" -- lcp=532 bakes in the trailing
-    # "GOSUB " already, so the body is just the target.
+    # "GOSUB " already, so the body is just the target. This is the
+    # one variant with direct real-file confirmation -- see the long
+    # comment above this block.
     m = re.match(r"^ON\s+MENU\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
     if m:
         idx = pool.get_or_add(11, m.group(1))
         push16(out, 532)
-        out.append(240 + 11)
-        push16(out, idx)
+        out.append(224 + 11)
+        out.append(idx & 0xFF)
         _append_comment(out, comment)
         return bytes(out)
 
@@ -2353,28 +2382,32 @@ def _append_comment(out: bytearray, comment: tuple[int, str] | None) -> None:
         # follows it), then an even-byte pad if needed -- confirmed
         # against a real GFA-BASIC editor's own tokenized output
         # (the companion GFA Decompiler project's Hatari-based
-        # verification): every one of a small test program's 8 lines
-        # matched byte-for-byte once this sentinel+pad was accounted
-        # for, with no other difference. The previous version of this
-        # function omitted it entirely, reasoning (wrongly, it turns
-        # out) that our own detokenizer's lenient `while pos < len(raw)`
-        # loop tolerates its absence -- true, but the real editor
-        # doesn't accept files missing it: this was a real, confirmed
-        # bug, not a style choice (round-tripping through this project's
-        # own tokenizer/detokenizer pair never caught it, since the
-        # detokenizer never required the byte it was missing).
+        # verification). The previous version of this function omitted
+        # the sentinel entirely, reasoning (wrongly) that our own
+        # detokenizer's lenient `while pos < len(raw)` loop tolerates
+        # its absence -- true, but the real editor doesn't accept files
+        # missing it.
         #
-        # The pad byte's own VALUE is 70 again (repeating the sentinel),
-        # not a zero byte -- that first 8-line test program never
-        # happened to exercise a line needing this pad at all, so the
-        # zero-byte guess went unverified until a real GFA-BASIC -s
-        # debug compile of 'c$=a$+b$+g$'/'i$=TRIM$(...)'/three PRINT
-        # statements (RTLIBTS2) showed the real editor's own tokenizer
-        # emitting a second 70 byte in every line needing a pad, never
-        # a zero. Fixed: pad with another sentinel byte, not zero.
+        # The pad byte's own VALUE is a plain zero, NOT another 70. An
+        # earlier version of this comment claimed the opposite (citing
+        # an "RTLIBTS2" ground-truth compile whose files no longer
+        # exist in the repo to re-check), but that is contradicted by
+        # FIVE independent, directly-isolated confirmations in one
+        # session (2026-09-09): a Hatari -s debug compile named
+        # MENUFNPS.PRG/.GFA (containing RETURN, END, a bare PROCEDURE
+        # header, and MENU OFF -- all bare, comment-less, odd-length-
+        # so-far lines) byte-diffed exactly against this tokenizer's
+        # own output for the same source, with the ONLY remaining
+        # difference at this exact pad position, in every one of the
+        # five: real GFA-BASIC wrote 0x00, this code wrote 70. Given
+        # the RTLIBTS2 claim can no longer be re-verified and this
+        # fresh evidence is unambiguous and reproducible, trusting the
+        # zero-byte pad. (See DEVLOG.md, "GFA Tokenizer sep[18] bug
+        # FOUND+FIXED" entry, if this ever needs re-litigating against
+        # new ground truth.)
         out.append(70)
         if len(out) & 1:
-            out.append(70)
+            out.append(0)
         return
     n, ctext = comment
     out.append(70)
@@ -2912,13 +2945,35 @@ def tokenize_source(text: str) -> bytes:
     sep[17] = sep[16]
     listing_end = sep[16] + len(listing)
     sep[19] = listing_end
-    # sep[18] = start of the END_OF_PROGRAM sentinel's own encoded line
-    # (2-byte size prefix + 2-byte lcp=180 content -- always exactly 4
-    # bytes, the last entry in `encoded`/`listing`) -- confirmed against
-    # a real GFA-BASIC editor's own saved file, whose sep[18] was
-    # consistently sep[19]-4 rather than sep[16] (this function's
-    # previous placeholder assumption).
-    sep[18] = listing_end - 4
+    # sep[18]: real GFA-BASIC-editor-saved files consistently show
+    # sep[18] == sep[16] == sep[17] (all three sitting at the START of
+    # the listing, not near its end) -- confirmed against SEVEN
+    # independent real saved files: the GFA-BASIC 3.60TT compiler's own
+    # bundled default.gfa/hell.gfa test files (both containing
+    # PROCEDURE definitions, both with the classic identifier pool
+    # only -- no extra literal-constant pool), PLUS three Hatari-
+    # compiled ground-truth probes built for the companion GFA
+    # Decompiler project (AESPROBE/WINPROBE/MENUFNPS -- resaved by the
+    # real editor after a naive sep[19]-4 guess here bombed the editor
+    # 3 times on load for the PROCEDURE-containing one, MENUFNPROBE).
+    # A previous placeholder guessed sep[19]-4 instead -- that number
+    # only ever matched by coincidence, on trivial test files (like
+    # gb36test_archive's default2/3/4.gfa) whose ENTIRE listing is just
+    # the 4-byte END_OF_PROGRAM sentinel with no real content, making
+    # "start of listing" (sep[16]) and "listing_end - 4" the same
+    # number purely because the listing itself is only 4 bytes long.
+    # (Two OTHER real files in that same bundled-test corpus,
+    # default5.gfa and sky.gfa, show sep[17]/sep[18] diverging from
+    # sep[16] by a large amount -- real GFA-BASIC appears to intern an
+    # extra literal-constant pool for programs with unusual numeric
+    # literals (default5's is entirely &H/&O/&X radix-prefixed
+    # constants) between the identifier pool and the listing proper in
+    # some cases. This tokenizer does not build any such extra pool --
+    # everything is inlined directly into the token stream, the same
+    # way the companion Detokenizer decodes it -- so for every file
+    # THIS tokenizer itself produces, sep[16]/[17]/[18] are correctly
+    # always identical: there is no other pool to point past.)
+    sep[18] = sep[16]
     running_count = listing_end
     for i in range(16):
         running_count += 4 * group_entry_counts[i]
