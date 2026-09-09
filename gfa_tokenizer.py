@@ -634,16 +634,29 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 # The very first token of this tokenize_expr call, but
                 # NOT the entire expression by itself (a bare 'x%=5'
                 # takes the separate _try_bare_int_literal_rhs shortcut
-                # above tokenize_expr entirely and never reaches here) --
-                # e.g. the leading '0' in the '0 - operand' rewrite's
-                # '0-x%'. Confirmed 2026-08-25 via 'z%=0-x%': needs the
-                # same odd+filler form (own even code as filler) as a
-                # bare whole-RHS literal does, not the plain form used
-                # for a later literal in the same list/call (see
-                # was_array_open's own comment below).
+                # above tokenize_expr entirely and never reaches here).
+                # NOTE: the '0 - operand' unary-minus rewrite's own
+                # injected leading '0' (see pending_unary_minus's own
+                # docstring above) does NOT reach this branch -- it's
+                # emitted by its own separate, self-contained code
+                # right where it's injected (using the pair's own even
+                # code as filler, confirmed via 'z%=0-x%'), specifically
+                # BECAUSE this shared branch needs a different filler
+                # for every other caller that lands here. This branch is
+                # for a genuine first-argument literal of a bare
+                # statement's own argument list (e.g. 'ARECT 10,...',
+                # 'ALINE 10,...', 'CURVE 10,...', 'POLYLINE 2,x(),y()')
+                # -- CONFIRMED via a real Hatari compile (the companion
+                # GFA Decompiler project's Hard_Drive/TESTING/
+                # DIMPROBF.GFA) across seven independent occurrences
+                # (ARECT/ALINE/ACHAR/CURVE/POLYLINE/POLYFILL/POLYMARK,
+                # all with the SAME 10 or 2 leading literal) that this
+                # context wants a plain ZERO filler byte, not the pair's
+                # own even code the way this project used to emit
+                # unconditionally here.
                 even = {10: 200, 16: 202, 8: 204, 2: 206}[base]
                 out.append(even + 1)
-                out.append(even)
+                out.append(0)
                 push32(out, int(value))
             elif not was_array_open:
                 # Plain form: no filler byte. Used for every numeric
@@ -1116,6 +1129,48 @@ def _try_bare_int_literal_rhs(rhs: str) -> bytes | None:
         return None
     out = bytearray()
     out.append(201)
+    out.append(200)
+    push32(out, int(m.group(1)))
+    return bytes(out)
+
+
+def _try_bare_int_literal_array_value(rhs: str) -> bytes | None:
+    """ARRAY_ASSIGN_LCP/LET_ARRAY_ASSIGN_LCP's own value expression ('the
+    5' in 'arr%(0)=5') -- a THIRD, previously undocumented bare-integer
+    shape, distinct from both _try_bare_int_literal_rhs's plain-scalar
+    form (pft 201 + even-code 200 filler + 4 bytes, used for 'x%=5') and
+    tokenize_expr's own 'was_first_token' fallback (also 201+200 filler,
+    meant for a literal injected mid-expression, e.g. the '0' in a
+    '0-x%' rewrite) -- this one drops the odd-code prefix AND the filler
+    byte entirely: just the plain EVEN code (200) followed directly by
+    the 4-byte two's-complement value, one byte shorter than either of
+    those two.
+
+    Before this existed, 'arr(i)=<bare int literal>' fell through to a
+    plain `tokenize_expr(rhs, ...)` call with no array_open flag, which
+    (since the value is the sole/first token of that call) always took
+    tokenize_expr's own 'was_first_token' branch and emitted the WRONG,
+    one-byte-longer 201+200-filler shape instead.
+
+    CONFIRMED via a real Hatari compile (the companion GFA Decompiler
+    project's Hard_Drive/TESTING/DIMPROBF.GFA, an editor-resave of a
+    file this project's own tokenizer had produced): 'arr%(0)=5',
+    'arr2%(1,1)=9', 'px%(0)=50', 'py%(0)=50', 'px%(1)=150', and
+    'py%(1)=150' all independently confirm the same shorter [200][4-byte
+    value] shape with no exceptions -- discovered because the extra byte
+    this project used to emit shifted every subsequent listing offset,
+    which is suspected (not yet independently proven) to be the actual
+    cause of a real "3 bombs" GFA-BASIC editor crash on load reported
+    against a file containing several of these assignments together
+    (see DEVLOG.md's DIMPROBE investigation for the full writeup).
+    Base-10 only, same scope restriction as _try_bare_int_literal_rhs --
+    &H/&O/&X literals and non-literal expressions still fall through to
+    the caller's own generic tokenize_expr call unchanged.
+    """
+    m = _INT_RHS_RE.match(rhs)
+    if not m:
+        return None
+    out = bytearray()
     out.append(200)
     push32(out, int(m.group(1)))
     return bytes(out)
@@ -2041,7 +2096,8 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
             push16(out, idx)
             out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
             out.append(PFT_TEXT_TO_CODE[")="])
-            out += tokenize_expr(rhs, 0, len(rhs), pool)
+            arr_val_lit = _try_bare_int_literal_array_value(rhs)
+            out += arr_val_lit if arr_val_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
             _append_comment(out, comment)
             return bytes(out)
 
@@ -2071,7 +2127,8 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
         push16(out, idx)
         out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
         out.append(PFT_TEXT_TO_CODE[")="])
-        out += tokenize_expr(rhs, 0, len(rhs), pool)
+        arr_val_lit = _try_bare_int_literal_array_value(rhs)
+        out += arr_val_lit if arr_val_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
         _append_comment(out, comment)
         return bytes(out)
 
@@ -2089,7 +2146,8 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                 push16(out, idx)
                 out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
                 out.append(PFT_TEXT_TO_CODE[")="])
-                out += tokenize_expr(rhs, 0, len(rhs), pool)
+                arr_val_lit = _try_bare_int_literal_array_value(rhs)
+                out += arr_val_lit if arr_val_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
                 _append_comment(out, comment)
                 return bytes(out)
         # "LET arr(i)=expr", no sigil -- same DIM-pre-scan gating as the
@@ -2104,7 +2162,8 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
             push16(out, idx)
             out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
             out.append(PFT_TEXT_TO_CODE[")="])
-            out += tokenize_expr(rhs, 0, len(rhs), pool)
+            arr_val_lit = _try_bare_int_literal_array_value(rhs)
+            out += arr_val_lit if arr_val_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
             _append_comment(out, comment)
             return bytes(out)
         am = _ASSIGN_RE.match(let_rest)
@@ -2218,10 +2277,27 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     kw_lcp = _match_leading_keyword(body)
     if kw_lcp is not None:
         lcp, rest_start = kw_lcp
+        rest = body[rest_start:]
+        if lcp == 1596 and not _split_top_level_commas(rest.strip())[1:]:
+            # BITBLT has two distinct compiled forms depending on its
+            # own argument count/shape: the documented 3-array form
+            # ('BITBLT s_mfdb%(),d_mfdb%(),par%()', lcp=1596, the only
+            # one this project had ever encoded) versus a single bare
+            # pointer-argument form ('BITBLT addr%', an INLINE-style MFDB
+            # struct address) which uses a genuinely different lcp,
+            # 1604. CONFIRMED via a real Hatari compile (the companion
+            # GFA Decompiler project's Hard_Drive/TESTING/DIMPROBF.GFA,
+            # an editor-resave of a file this project's own tokenizer
+            # had produced): 'BITBLT addr%' -> '[lcp 1604][addr%][46]',
+            # NOT lcp 1596 the way this project always emitted regardless
+            # of argument shape. Gated on "no top-level comma" (i.e.
+            # exactly one argument) rather than sniffing the argument's
+            # own shape, since the 3-array form always has exactly two
+            # commas and the scalar form always has none.
+            lcp = 1604
         push16(out, lcp)
         if lcp in HEADER_SKIP4_LCP:
             out += b"\x00\x00\x00\x00"
-        rest = body[rest_start:]
         if rest.strip():
             if lcp in PRINT_LCPS:
                 # See PRINT_LCPS' own comment: each non-string-typed
