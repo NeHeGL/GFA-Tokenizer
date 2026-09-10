@@ -1245,7 +1245,7 @@ def _split_trailing_comment(text: str) -> tuple[str, str | None]:
     """Splits 'STATEMENT ! comment' into (statement, comment_text) --
     comment_text is None if there's no trailing '!' comment. Doesn't
     split on '!' inside a string literal, or on a '!' that's actually
-    the single-precision REAL sigil (e.g. 'a!=0 !COMMENT' has a sigil
+    the BOOLEAN type sigil (e.g. 'a!=0 !COMMENT' has a sigil
     '!' right after 'a' and a real comment '!' later -- distinguished
     by an identifier character immediately before AND '=' or '(' or a
     following identifier character immediately after, the shapes a
