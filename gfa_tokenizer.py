@@ -2611,6 +2611,20 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                     if i > 0:
                         out.append(PFT_TEXT_TO_CODE[","])
                     out += tokenize_expr(part, 0, len(part), pool, seed_force_float_literal=(i == len(parts) - 1))
+            elif lcp == 1800:
+                # DMASOUND: its THIRD argument specifically (not the
+                # last) uses the odd-filler integer form -- confirmed
+                # 2026-09-10 via COVFULL.LST vs a real editor's own
+                # COVFULL9.GFA ('DMASOUND addr%,addr%,3,3''s first 3 is
+                # 'c9 00 00 00 00 03', its second 3 stays plain 'c8 00
+                # 00 00 03'). Genuinely a different argument position
+                # than the BSAVE family's own "last argument" rule --
+                # not generalized, just this one confirmed shape.
+                parts = _split_top_level_commas(rest)
+                for i, part in enumerate(parts):
+                    if i > 0:
+                        out.append(PFT_TEXT_TO_CODE[","])
+                    out += tokenize_expr(part, 0, len(part), pool, array_open=(i == 2))
             else:
                 out += tokenize_expr(rest, 0, len(rest), pool)
         _append_comment(out, comment)
