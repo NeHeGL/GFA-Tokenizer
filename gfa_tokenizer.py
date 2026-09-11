@@ -2142,13 +2142,32 @@ def encode_line(
         _append_comment(out, comment)
         return bytes(out)
 
+    # "EVERY STOP" -- lcp 1452 (EVEHOLD in gfalct, the 2nd of EVERY's own
+    # 3 lcp slots, matching the manual's own listed order "EVERY, EVERY
+    # STOP, EVERY CONT") -- confirmed 2026-09-11 via a real-world archive
+    # program's own compiled binary (Hard_Drive/GFA_CODE/Unknown/
+    # FLEXFILE/FLEXFILE.GFA: 'EVERY STOP' -> '05ac 98 46'). The single
+    # extra byte (0x98) after the header isn't understood (not the usual
+    # 4-byte HEADER_SKIP4_LCP shape, and no argument expression follows
+    # a bare STOP/CONT statement) -- copied verbatim from the one
+    # confirmed real example rather than guessed at. EVERY CONT/AFTER
+    # STOP/AFTER CONT (EVECONT/AFTHOLD/AFTCONT) remain unconfirmed and
+    # unhandled -- no matching real .GFA found for those forms yet.
+    m = re.match(r"^EVERY\s+STOP\s*$", body, re.IGNORECASE)
+    if m:
+        push16(out, 1452)
+        out.append(0x98)
+        _append_comment(out, comment)
+        return bytes(out)
+
     # "AFTER delay GOSUB name" / "EVERY delay GOSUB name" -- confirmed
     # from ground truth: the keyword's own lcp is followed directly by
     # the delay expression, then the SAME mid-expression "GOSUB" pft
     # token (76) used inside "ON expr GOSUB target" forms, then the
     # target resolved through the procedure name group (type 11), same
-    # as standalone GOSUB above. AFTHOLD/AFTCONT/EVEHOLD/EVECONT (the
-    # other three lcp each of these keywords also has) aren't handled.
+    # as standalone GOSUB above. AFTHOLD/AFTCONT/EVECONT (the other
+    # three lcp EVERY/AFTER each also have besides EVEHOLD above) aren't
+    # handled.
     m = re.match(r"^(AFTER|EVERY)\s+(.*?)\s+GOSUB\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$", body, re.IGNORECASE)
     if m:
         kw, delay_expr, target = m.group(1).upper(), m.group(2), m.group(3)
@@ -2952,6 +2971,29 @@ def encode_line(
             out += b"\x00\x00\x00\x00"
         if rest.strip():
             if lcp in PRINT_LCPS:
+                # PRINT/LPRINT USING fmt,item;item... -- 'USING ' is its
+                # own dedicated GFAPFT token (163), emitted directly
+                # (not through _split_print_items/pft-55 marking, which
+                # is for ordinary print items only), then the format
+                # argument (a string literal OR a string variable/
+                # expression -- confirmed real 2026-09-11 via
+                # SONNENUH.GFA/EASYMINT-adjacent archive .GFA files:
+                # 'PRINT USING "##",minuten#' uses a literal, 'LPRINT
+                # USING us$,stunden#' a variable, both taking the SAME
+                # shape: 'USING' token + format expr + ',' + the
+                # ordinary marked item list), no pft-55 marker on the
+                # format argument itself (it's inherently string-typed).
+                # Previously fell through to the generic item-split
+                # logic below, which wrongly treated 'USING "fmt"' as
+                # one non-string print item and prepended a spurious
+                # pft-55 marker before the 'USING' keyword token itself.
+                using_m = re.match(r"^\s*USING\s+(.*?)\s*,\s*(.*)$", rest, re.IGNORECASE)
+                if using_m:
+                    fmt_expr, using_rest = using_m.groups()
+                    out.append(163)
+                    out += tokenize_expr(fmt_expr, 0, len(fmt_expr), pool)
+                    out.append(PFT_TEXT_TO_CODE[","])
+                    rest = using_rest
                 # See PRINT_LCPS' own comment: each non-string-typed
                 # print item needs an extra invisible marker byte (pft
                 # 55) right before it.
@@ -2961,7 +3003,15 @@ def encode_line(
                     elif chunk.strip():
                         if not _expr_starts_string(chunk):
                             out.append(55)
-                        out += tokenize_expr(chunk, 0, len(chunk), pool)
+                        # A USING-formatted numeric item's own literal
+                        # uses the no-marker pft 223 packed-float form,
+                        # not a plain integer -- confirmed 2026-09-11 via
+                        # SONNENUH.GFA ('PRINT USING "   Y=###",380-y#'
+                        # 's 380 is 'df be...0407' i.e. packed-float
+                        # 380.0, not a plain pft200/201 integer). Only
+                        # applies inside PRINT/LPRINT USING -- ordinary
+                        # PRINT items are untouched.
+                        out += tokenize_expr(chunk, 0, len(chunk), pool, seed_binary_arith_op=using_m is not None)
             elif lcp == 840:
                 # DIM -- see _encode_dim_list's own docstring for why
                 # this can't just go through the generic tokenize_expr
