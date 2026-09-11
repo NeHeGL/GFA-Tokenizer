@@ -486,7 +486,7 @@ def _try_match_keyword(text: str, pos: int, table: dict[str, int], max_len: int)
 _CURRENT_DECLARED_ARRAYS: frozenset[str] = frozenset()
 
 
-def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False, seed_binary_arith_op: bool = False) -> bytes:
+def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False, seed_binary_arith_op: bool = False, seed_force_float_literal: bool = False) -> bytes:
     out = bytearray()
     # Tracks whether the most recently emitted atom (literal, var-ref, or
     # builtin-function call) was string-typed -- used to pick the right
@@ -563,7 +563,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # odd+filler integer form instead, see force_odd_filler below), so
     # this can't be a blanket "any GFASFT argument" rule -- each GFASFT
     # entry needs its own confirmation before being added here.
-    force_float_literal = False
+    force_float_literal = seed_force_float_literal
     # Set for exactly one iteration right after emitting a BINARY
     # arithmetic OR comparison operator ('+', '-', '*', '/', '=', '<>',
     # '<', '>', '<=', '>=' with a real value before it -- string '+'
@@ -1814,10 +1814,25 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
         lcp = 1460 if kw == "AFTER" else 1448
         idx = pool.get_or_add(11, target)
         push16(out, lcp)
-        out += tokenize_expr(delay_expr, 0, len(delay_expr), pool)
+        # delay_expr's literal is coerced to REAL (pft 221), same as
+        # EVEN(/ODD(''s argument -- confirmed 2026-09-10 via COVFULL.LST
+        # vs a real editor's own COVFULL9.GFA ('EVERY 400 GOSUB ...''s
+        # 400 is 'dd 00' + double_to_gfa_float(400.0), not the plain
+        # integer this tokenizer produced without this seed). AFTER not
+        # independently confirmed but assumed the same shape (untested).
+        out += tokenize_expr(delay_expr, 0, len(delay_expr), pool, seed_force_float_literal=True)
         out.append(PFT_TEXT_TO_CODE["GOSUB"])
-        out.append(240 + 11)
-        push16(out, idx)
+        # Byte-sized var-index form (224-239) whenever the pool index
+        # fits in a byte, word-sized (240-255) only once it doesn't --
+        # this call site always used the wide form regardless, confirmed
+        # wrong via the same COVFULL9.GFA comparison ('EVERY 400 GOSUB
+        # timer_target''s target used the byte form, idx fit in a byte).
+        if idx < 256:
+            out.append(224 + 11)
+            out.append(idx)
+        else:
+            out.append(240 + 11)
+            push16(out, idx)
         _append_comment(out, comment)
         return bytes(out)
 
