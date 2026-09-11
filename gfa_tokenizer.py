@@ -174,6 +174,19 @@ PFT_REAL_ARG_FUNCTIONS = {
     "MAX(", "MIN(",
 }
 
+# GEM AES/VDI-family GFASFT builtins whose FIRST argument uses the odd-
+# filler integer form (array_open=True, zero_filler=False -- same
+# mechanism as SUCC(/PRED(''s GFASFT argument) instead of the plain
+# form -- confirmed 2026-09-10 via COVFULL.LST vs a real editor's own
+# COVFULL9.GFA. A clear family pattern (every one of these takes a
+# GEM handle/index as its first argument), but each one still
+# individually confirmed present in the diff, not assumed from the
+# other members alone.
+PFT_ODD_FILLER_FIRST_ARG_FUNCTIONS = {
+    "APPL_READ(", "APPL_WRITE(", "RSRC_GADDR(", "RSRC_SADDR(",
+    "SHEL_GET(", "OBJC_EDIT(", "FORM_BUTTON(",
+}
+
 # LEFT$(/RIGHT$( also each list two PFT codes for the identical display
 # text (58/59, 60/61) -- unlike '+'/the comparisons above, this isn't a
 # numeric-vs-string distinction (both codes are for the same read-only
@@ -516,6 +529,8 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # General "inside any function-call/grouping parens" depth counter
     # (see its own use-site docstring below).
     paren_depth = 0
+    # See PFT_ODD_FILLER_FIRST_ARG_FUNCTIONS' own match-site docstring.
+    odd_filler_pending = False
     # Which filler-byte VALUE the next odd+filler numeric literal (see
     # array_open below) should use -- True for a plain 0x00, False for
     # the pair's own even code instead. Defaults True to match every
@@ -779,6 +794,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 out.append(even + 1)
                 out.append(0 if was_zero_filler else even)
                 push32(out, int(value))
+                odd_filler_pending = False
             pos = newpos
             last_was_string = False
             last_was_string_literal = False
@@ -1028,6 +1044,9 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                         real_arg_paren_depth += 1
                 elif matched == "," and real_arg_paren_depth > 0:
                     just_saw_binary_arith_op = True
+                elif matched == "," and odd_filler_pending:
+                    array_open = True
+                    zero_filler = False
                 elif matched == "," and last_was_string and not (last_was_string_literal and paren_depth > 0):
                     # Re-arm the odd+filler literal form (see array_open's
                     # own docstring above) for the numeric argument right
@@ -1052,6 +1071,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     just_saw_value = True
                     if real_arg_paren_depth > 0:
                         real_arg_paren_depth -= 1
+                    odd_filler_pending = False
                 elif matched in ("-", "*", "/"):
                     # Binary arithmetic (this '-' already fell through
                     # the unary-minus branch above, so just_saw_value was
@@ -1087,6 +1107,23 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             elif matched_upper in ("SUCC(", "PRED("):
                 array_open = True
                 zero_filler = False
+            elif matched_upper in PFT_ODD_FILLER_FIRST_ARG_FUNCTIONS:
+                # Unlike SUCC(/PRED( (whose odd-filler argument is the
+                # very next token), these take one or more leading
+                # variable-reference arguments before their first real
+                # literal (e.g. 'OBJC_EDIT(tree%,obj&,65,...)' -- 65 is
+                # the third token). array_open/zero_filler are one-shot
+                # (reset every loop iteration), so a plain one-time set
+                # here would be consumed by 'tree%' instead. odd_filler_
+                # pending persists across the intervening var-refs/
+                # commas (re-armed by each, see their own sites below)
+                # until an actual literal consumes it. Also set
+                # array_open/zero_filler directly here too (not just via
+                # odd_filler_pending) for the immediate case (e.g.
+                # 'SHEL_GET(500,...)', no leading var-ref at all).
+                odd_filler_pending = True
+                array_open = True
+                zero_filler = False
             pos = newpos
             continue
         else:
@@ -1120,6 +1157,9 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             last_was_string = type_ in STRING_VST_TYPES
             last_was_string_literal = False
             just_saw_value = True
+            if odd_filler_pending:
+                array_open = True
+                zero_filler = False
             # Real GFA-BASIC uses the byte-sized var-index form
             # (pft 224-239) whenever the pool index fits in a byte,
             # falling back to the word-sized form (240-255, this
