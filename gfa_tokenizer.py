@@ -417,6 +417,23 @@ _FIELD63 = (1 << 63) - 1
 
 def double_to_gfa_float(value: float) -> bytes:
     (bits,) = struct.unpack(">Q", struct.pack(">d", abs(value)))
+    # GFA's own packed float has a 47-bit explicit mantissa (48 bits
+    # including the implicit leading 1), 5 fewer than an IEEE754
+    # double's 52 -- confirmed 2026-09-10 by reverse-engineering the
+    # exact rounding rule from four independent real-compiled literals
+    # in COVFULL9.GFA (3.14, 2.718281828, 3.7, 3.456, all previously
+    # tracked as unexplained "float-mantissa-precision noise"): each
+    # one's real encoded value equals ROUND(ieee754_bits / 32) * 32,
+    # i.e. round-to-nearest-multiple-of-32 on the raw 64-bit IEEE754
+    # bit pattern (mantissa+exponent are contiguous in that
+    # representation, so this single integer rounding operation
+    # correctly handles mantissa-overflow-into-exponent carries too,
+    # the same way IEEE754 arithmetic always has). Round-half-up is
+    # confirmed sufficient for these 4 cases (none were exact ties);
+    # the real compiler's own tie-breaking rule (round-half-up vs
+    # round-half-to-even) remains unconfirmed since no exact-tie
+    # example has been found yet.
+    bits = ((bits + 16) >> 5) << 5
     field = bits & _FIELD63
     rotated = ((field << 11) | (field >> (63 - 11))) & _FIELD63
     return rotated.to_bytes(8, "big")
@@ -3084,6 +3101,24 @@ def encode_line(
                         out.append(184 if part_stripped == "0" else 185)
                     else:
                         out += tokenize_expr(part, 0, len(part), pool)
+            elif lcp in (400, 408):
+                # SPOKE/SLPOKE: the value argument (after 'addr%,') uses
+                # the no-marker pft 223 packed-float form
+                # (seed_binary_arith_op), not the plain default a bare
+                # statement's generic fallthrough would give it --
+                # confirmed 2026-09-10 via COVFULL.LST vs a real
+                # editor's own COVFULL9.GFA ('SPOKE addr%,3.14'/'SLPOKE
+                # addr%,3.14' both want pft 223 for the 3.14). SDPOKE
+                # (404) is deliberately excluded -- its own confirmed
+                # shape uses ADD('s persistent odd-filler default
+                # instead (see that name's entry in the odd_filler_
+                # pending exception list above), not this rule.
+                parts = _split_top_level_commas(rest)
+                prefix = ",".join(parts[:-1])
+                if prefix:
+                    out += tokenize_expr(prefix, 0, len(prefix), pool)
+                    out.append(PFT_TEXT_TO_CODE[","])
+                out += tokenize_expr(parts[-1], 0, len(parts[-1]), pool, seed_binary_arith_op=True)
             elif lcp == 1296:
                 # FIELD: each 'length AS name$' clause's own length
                 # argument uses a forced-float packed-float form, not a
