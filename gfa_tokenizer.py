@@ -952,15 +952,21 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             # General "inside function-call/grouping parens" depth
             # counter -- see last_was_string_literal's own docstring:
             # the comma-rearm's string-literal exclusion only applies
-            # AT paren depth > 0 (a function call's own argument list,
-            # e.g. LEFT$("hello",3)); a bare statement's own top-level
-            # comma (paren_depth == 0, e.g. OPEN "R",#3,"random.dat",32)
-            # rearms regardless of literal-vs-variable -- confirmed
-            # 2026-09-10 via COVFULL.LST vs a real editor's own
-            # COVFULL9.GFA: excluding literals unconditionally (this
-            # project's first attempt) fixed LEFT$ but broke OPEN's own
-            # last argument, which needs the same rearm even though
-            # "random.dat" right before its comma is also a literal.
+            # AT paren depth > 0 (a GFAPFT-keyword function call's own
+            # argument list, e.g. LEFT$("hello",3), where a leading
+            # var-ref rearms but a leading LITERAL confirmed staying
+            # PLAIN); a bare statement's own top-level comma
+            # (paren_depth == 0, e.g. OPEN "R",#3,"random.dat",32)
+            # rearms only after a string LITERAL, not a variable --
+            # confirmed 2026-09-10 via COVFULL.LST vs a real editor's
+            # own COVFULL9.GFA on two fronts: OPEN's last argument needs
+            # the rearm even though "random.dat" right before its comma
+            # is a literal, while 'SPRITE sprite_data$,10,10' (a string
+            # VARIABLE at depth 0) confirmed the next literal ('10')
+            # must stay PLAIN. (GFASFT-called functions like FSFIRST(
+            # have their own SEPARATE odd-filler-persistence mechanism
+            # -- see odd_filler_pending's own docstring below -- so
+            # aren't governed by this comma-rearm at all.)
             if matched.endswith("("):
                 paren_depth += 1
             elif matched == ")" and paren_depth > 0:
@@ -1030,6 +1036,27 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # see just_saw_binary_arith_op's own docstring above
                     # for the '+' and 'IF a%=1' confirmations.
                     just_saw_binary_arith_op = True
+            elif matched.upper() == "STRING$(":
+                # STRING$( is the "STR$(' at 190,191,192 / STRING$(' at
+                # 129,130" duplicate this project's own docstring above
+                # had flagged as unconfirmed -- now confirmed 2026-09-10
+                # via COVFULL.LST vs COVFULL9.GFA: 'STRING$(32,0)' (2nd
+                # arg numeric) uses 129, 'STRING$(5,"x")' (2nd arg a
+                # string literal) uses 130. Only a quoted-string-literal
+                # 2nd argument is checked here (the two confirmed cases);
+                # a string VARIABLE 2nd argument's own code is untested.
+                depth = 1
+                p = newpos
+                while p < end and depth > 0:
+                    if text[p] == "(":
+                        depth += 1
+                    elif text[p] == ")":
+                        depth -= 1
+                    p += 1
+                inner = text[newpos:p - 1]
+                inner_parts = _split_top_level_commas(inner)
+                is_str_2nd = len(inner_parts) > 1 and inner_parts[1].strip().startswith('"')
+                out.append(130 if is_str_2nd else 129)
             else:
                 out.append(PFT_CODE_OVERRIDE.get(matched.upper(), code))
                 if matched.upper() in ("L:", "W:"):
@@ -1091,7 +1118,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 elif matched == "," and odd_filler_pending:
                     array_open = True
                     zero_filler = False
-                elif matched == "," and last_was_string and not (last_was_string_literal and paren_depth > 0):
+                elif matched == "," and last_was_string and (last_was_string_literal == (paren_depth == 0)):
                     # Re-arm the odd+filler literal form (see array_open's
                     # own docstring above) for the numeric argument right
                     # after this comma -- confirmed via RTLIBTS2's own
@@ -1148,18 +1175,24 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             # these specifically confirmed ones.
             if matched_upper in ("EVEN(", "ODD("):
                 force_float_literal = True
-            elif matched_upper in ("OBJC_EDIT(", "FORM_BUTTON("):
-                # These two specifically need the odd-filler treatment
-                # to PERSIST across one or more leading variable-
-                # reference arguments before reaching their first real
-                # literal (e.g. 'OBJC_EDIT(tree%,obj&,65,...)' -- 65 is
-                # the third token, after two var-refs) -- confirmed
-                # 2026-09-10 via COVFULL.LST vs a real editor's own
-                # COVFULL9.GFA. Distinct from the plain default just
-                # below: 'SHL(a%,1)''s second argument (also after one
-                # leading var-ref) confirmed staying PLAIN by the SAME
-                # comparison, so persistence-through-var-refs is NOT the
-                # general rule, just these two's own confirmed shape.
+            elif matched_upper in (
+                "OBJC_EDIT(", "FORM_BUTTON(", "MENU_IENABLE(", "OBJC_ORDER(",
+                "MENU_TNORMAL(", "OBJC_CHANGE(", "GRAF_WATCHBOX(",
+                "FSFIRST(", "ADD(",
+            ):
+                # These specifically need the odd-filler treatment to
+                # PERSIST across one or more leading variable-reference
+                # arguments before reaching their first real literal
+                # (e.g. 'OBJC_EDIT(tree%,obj&,65,...)' -- 65 is the
+                # third token, after two var-refs; likewise
+                # 'MENU_IENABLE(tree%,obj&,1)' and
+                # 'OBJC_ORDER(tree%,obj&,0)') -- confirmed 2026-09-10 via
+                # COVFULL.LST vs a real editor's own COVFULL9.GFA.
+                # Distinct from the plain default just below: 'SHL(a%,1)'
+                # 's second argument (also after one leading var-ref)
+                # confirmed staying PLAIN by the SAME comparison, so
+                # persistence-through-var-refs is NOT the general rule,
+                # just these specific confirmed cases' own shape.
                 odd_filler_pending = True
                 array_open = True
                 zero_filler = False
@@ -2602,17 +2635,50 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     if kw_lcp is not None:
         lcp, rest_start = kw_lcp
         rest = body[rest_start:]
-        if lcp == 1424 and re.search(r"\bOFFSET\b", rest, re.IGNORECASE):
-            # CLIP has a distinct lcp (1432, not 1424) when it carries an
-            # optional 'OFFSET dx,dy' clause -- confirmed 2026-09-10 via
-            # COVFULL.LST vs a real editor's own COVFULL9.GFA ('CLIP
-            # 0,0,100,100 OFFSET 5,5' uses lcp 1432, plain 'CLIP
-            # 0,0,100,100' uses 1424). The OFFSET clause's own dx,dy
+        if lcp == 1424 and rest.strip().upper() != "OFF":
+            # CLIP has two distinct lcp forms: 1424 is the bare 'CLIP
+            # OFF' statement, 1432 is every coordinate-argument form
+            # ('CLIP x,y,w,h', with or without a trailing 'OFFSET dx,dy'
+            # clause) -- corrected 2026-09-10 via COVFULL.LST vs a real
+            # editor's own COVFULL9.GFA: an earlier attempt had wrongly
+            # gated this on the presence of the literal 'OFFSET' text
+            # instead, guessing plain 'CLIP 0,0,100,100' (no OFFSET
+            # clause) kept 1424 -- the fuller comparison done this
+            # session showed it actually uses 1432 too, exactly like the
+            # OFFSET-clause form; only 'CLIP OFF' (no coordinate args at
+            # all) genuinely uses 1424. The OFFSET clause's own dx,dy
             # values are plain, no special literal encoding needed --
             # only the header lcp differs, so 'rest' (including the
-            # literal 'OFFSET' text) still tokenizes through the
-            # ordinary generic path below unchanged.
+            # literal 'OFFSET' text, when present) still tokenizes
+            # through the ordinary generic path below unchanged.
             lcp = 1432
+        if lcp == 1228 and len(_split_top_level_commas(rest.strip())) >= 3:
+            # OUT has two lcp forms depending on argument count: 1228 is
+            # 'OUT #chan,value' (2 arguments), 1232 is 'OUT #chan,port,
+            # value' (3 arguments) -- confirmed 2026-09-10 via
+            # COVFULL.LST vs a real editor's own COVFULL9.GFA ('OUT
+            # #1,65,66' uses lcp 1232, not 1228).
+            lcp = 1232
+        if lcp == 844 and len(_split_top_level_commas(rest.strip())) == 4:
+            # SETCOLOR has multiple lcp forms depending on argument
+            # count, same idea as OUT/VDISYS above. Only the 4-argument
+            # form's own lcp is confirmed so far: 848, not the base 844
+            # -- confirmed 2026-09-10 via COVFULL.LST vs COVFULL9.GFA
+            # ('SETCOLOR 1,2,3,4' uses 848). Other argument counts'
+            # real lcp values are still unconfirmed -- left as the
+            # generic 844 rather than guessed.
+            lcp = 848
+        if lcp == 860 and len(_split_top_level_commas(rest.strip())) == 4:
+            # VDISYS has multiple lcp forms depending on argument count
+            # (the companion GFA Decompiler project's own disassembled
+            # corpus shows real VDISYS calls with 1, 3, and 4 arguments
+            # -- see 2048_source.txt). Only the 4-argument form's own lcp
+            # is confirmed so far: 868, not the base 860 -- confirmed
+            # 2026-09-10 via COVFULL.LST vs COVFULL9.GFA ('VDISYS
+            # 5,0,0,13' uses 868). The 1- and 3-argument forms' own real
+            # lcp values are still unconfirmed -- left as the generic
+            # 860 rather than guessed.
+            lcp = 868
         if lcp == 1596 and not _split_top_level_commas(rest.strip())[1:]:
             # BITBLT has two distinct compiled forms depending on its
             # own argument count/shape: the documented 3-array form
@@ -2780,6 +2846,101 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                         push32(out, int(part_stripped) & 0xFFFFFFFF)
                     else:
                         out += tokenize_expr(part, 0, len(part), pool)
+            elif lcp == 1292:
+                # EXEC: its first argument (the mode flag) uses the
+                # dedicated single-byte GFAPFT literal tokens 184 ('0')
+                # / 185 ('1') when it's exactly that bare digit, NOT the
+                # general pft-200/201 numeric-literal encoding every
+                # other bare-integer argument gets -- confirmed
+                # 2026-09-10 via COVFULL.LST vs a real editor's own
+                # COVFULL9.GFA ('EXEC 0,"test.prg","",""' uses a single
+                # 'b8' byte for its '0', not 'c9 00 00 00 00 00'). Only
+                # a bare '0'/'1' first argument is special-cased; other
+                # values/expressions there are untested, so they fall
+                # through to the general tokenizer unchanged.
+                parts = _split_top_level_commas(rest)
+                for i, part in enumerate(parts):
+                    if i > 0:
+                        out.append(PFT_TEXT_TO_CODE[","])
+                    part_stripped = part.strip()
+                    if i == 0 and part_stripped in ("0", "1"):
+                        out.append(184 if part_stripped == "0" else 185)
+                    else:
+                        out += tokenize_expr(part, 0, len(part), pool)
+            elif lcp == 1296:
+                # FIELD: each 'length AS name$' clause's own length
+                # argument uses a forced-float packed-float form, not a
+                # plain integer -- confirmed 2026-09-10 via COVFULL.LST
+                # vs a real editor's own COVFULL9.GFA ('FIELD #3,16 AS
+                # field_a$,16 AS field_b$'). The FIRST such length uses
+                # the no-marker pft 223 form (seed_binary_arith_op --
+                # same code a value right after a binary/comparison
+                # operator gets), every LATER one the marker-byte pft
+                # 221 form (seed_force_float_literal) -- confirmed by the
+                # SAME comparison showing the two 16's using different
+                # packed-float opcodes despite identical syntax. The
+                # leading '#3' channel argument is untouched.
+                parts = _split_top_level_commas(rest)
+                for i, part in enumerate(parts):
+                    if i > 0:
+                        out.append(PFT_TEXT_TO_CODE[","])
+                    m3 = re.match(r"^(\s*\d+\s+)(AS\s+.+)$", part, re.IGNORECASE)
+                    if m3:
+                        length_part, as_part = m3.group(1), m3.group(2)
+                        if i == 1:
+                            out += tokenize_expr(length_part, 0, len(length_part), pool, seed_binary_arith_op=True)
+                        else:
+                            out += tokenize_expr(length_part, 0, len(length_part), pool, seed_force_float_literal=True)
+                        out += tokenize_expr(as_part, 0, len(as_part), pool)
+                    else:
+                        out += tokenize_expr(part, 0, len(part), pool)
+            elif lcp == 1652:
+                # RC_COPY: the coordinate right after its own 'TO
+                # dest%,' target gets the one-shot odd-filler literal
+                # form, same idea as a GFASFT call's own first-argument
+                # default (see the sft branch's own docstring above),
+                # but triggered by 'TO's target var-ref instead of an
+                # opening paren -- confirmed 2026-09-10 via COVFULL.LST
+                # vs a real editor's own COVFULL9.GFA ('RC_COPY
+                # rc_dadr%,0,0,10,10 TO rc_dadr%,20,20' -- the first '20'
+                # after 'TO rc_dadr%,' is odd-filler, the second '20'
+                # stays plain). Everything before 'TO' is untouched.
+                m2 = re.search(r"\bTO\b", rest, re.IGNORECASE)
+                if m2:
+                    prefix, to_kw, tail = rest[:m2.start()], rest[m2.start():m2.end()], rest[m2.end():]
+                    out += tokenize_expr(prefix, 0, len(prefix), pool)
+                    out += tokenize_expr(to_kw, 0, len(to_kw), pool)
+                    # Dest var-ref combined normally; the two coordinates
+                    # after it are fed as ONE tokenize_expr call (not
+                    # split per-argument) so only the true first token
+                    # of that call (the first coordinate) gets
+                    # was_first_token's own odd-filler treatment -- a
+                    # full per-segment split wrongly gave the SECOND
+                    # coordinate its own fresh "first token" state too,
+                    # same class of mistake as ARECT/DMASOUND's own
+                    # docstring above warns about.
+                    tail_parts = _split_top_level_commas(tail)
+                    dest_expr = tail_parts[0]
+                    coords = ",".join(tail_parts[1:])
+                    out += tokenize_expr(dest_expr, 0, len(dest_expr), pool)
+                    out.append(PFT_TEXT_TO_CODE[","])
+                    out += tokenize_expr(coords, 0, len(coords), pool, array_open=True)
+                else:
+                    out += tokenize_expr(rest, 0, len(rest), pool)
+            elif lcp in (1216, 1340) and "=" in rest:
+                # LSET/RSET's own '=' is pft 69 (the plain-assignment
+                # form DEFFN's own matcher also hardcodes -- see its
+                # comment and PFT_CODE_OVERRIDE's own docstring for the
+                # three duplicate '=' codes), not the ambiguous
+                # PFT_TEXT_TO_CODE["="] default (19/27) the generic
+                # tokenize_expr fallthrough would pick -- confirmed
+                # 2026-09-10 via COVFULL.LST vs a real editor's own
+                # COVFULL9.GFA ('LSET f$=f$'/'RSET f$=f$' both use 69).
+                eq_pos = rest.index("=")
+                lhs, rhs = rest[:eq_pos], rest[eq_pos + 1:]
+                out += tokenize_expr(lhs, 0, len(lhs), pool)
+                out.append(69)
+                out += tokenize_expr(rhs, 0, len(rhs), pool)
             else:
                 out += tokenize_expr(rest, 0, len(rest), pool)
         _append_comment(out, comment)
@@ -3014,7 +3175,7 @@ _SIMPLE_KEYWORDS = {
     # as every other entry above; none of these have more than one
     # non-generic real-argument form to disambiguate.
     "SDPOKE": 404, "SLPOKE": 408, "DELAY": 440, "ABSOLUTE": 1012,
-    "RANDOMIZE": 1020, "CHDRIVE": 1248, "DIR": 1276, "FILES": 1300,
+    "RANDOMIZE": 1020, "CHDRIVE": 1252, "DIR": 1276, "FILES": 1300,
     "MKDIR": 1324, "KILL": 1332, "RMDIR": 1336, "PAUSE": 1376,
     "QSORT": 1380, "SSORT": 1384, "DEFINT": 1524, "DEFFLT": 1528,
     "DEFBYT": 1532, "DEFWRD": 1536, "DEFBIT": 1540, "DEFSTR": 1544,
