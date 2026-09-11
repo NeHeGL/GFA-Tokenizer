@@ -511,20 +511,32 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # independently ground-truth-checked yet.
     pending_unary_minus = False
     # Set for exactly one iteration right after emitting a BINARY
-    # arithmetic operator ('+', '-', '*', '/' with a real value before
-    # it -- string '+' concatenation excluded, see its own check below):
-    # the very next plain base-10 literal (integer OR float) is encoded
-    # as pft 223 -- 8 bytes (double_to_gfa_float of the value, first byte
-    # OR'd with 0x80), with NO extra marker byte -- instead of its normal
-    # form. Confirmed 2026-08-25 via a real hand-typed-and-compiled
-    # 'y%=x%-1': its '1' operand is 'df 80 00 00 00 00 00 03 ff', which is
-    # pft 223 followed by double_to_gfa_float(1.0) ('00 00 00 00 00 00 03
-    # ff') with its own first byte OR'd -- NOT the plain integer form
+    # arithmetic OR comparison operator ('+', '-', '*', '/', '=', '<>',
+    # '<', '>', '<=', '>=' with a real value before it -- string '+'
+    # concatenation excluded, see its own check below): the very next
+    # plain base-10 literal (integer OR float) is encoded as pft 223 --
+    # 8 bytes (double_to_gfa_float of the value, first byte OR'd with
+    # 0x80), with NO extra marker byte -- instead of its normal form.
+    # Confirmed 2026-08-25 via a real hand-typed-and-compiled 'y%=x%-1':
+    # its '1' operand is 'df 80 00 00 00 00 00 03 ff', which is pft 223
+    # followed by double_to_gfa_float(1.0) ('00 00 00 00 00 00 03 ff')
+    # with its own first byte OR'd -- NOT the plain integer form
     # (200/201) this project had always used for every bare literal
-    # until now. Only confirmed for '-' so far; '+'/'*'/'/' are a
-    # reasoned generalization (same runtime arithmetic stack, no reason
-    # GFA would special-case the operator symbol here) pending their own
-    # direct confirmation.
+    # until now.
+    #
+    # Comparison operators confirmed 2026-09-10 via the companion GFA
+    # Decompiler project's COVFULL.LST coverage test: 'IF a%=1's '1' is
+    # 'df 80 00 00 00 00 00 03 ff' (identical shape) in a real editor's
+    # own Merge-then-Save of the file, but this tokenizer produced
+    # 'c8 00 00 00 01' (plain 32-bit integer, pft 200) instead -- a real
+    # 4-byte-per-occurrence length mismatch that threw off every
+    # subsequent line's own byte accounting, corrupting identifier-pool
+    # resolution deep into the file and load-bombing the real editor.
+    # The bug: this flag was only ever set for '+' (see the '+'-specific
+    # check below), never for the other seven AMBIGUOUS_OP_CODES entries
+    # (comparisons share that same table). Fixed to cover all of them --
+    # '*'/'/' were already a reasoned-but-unconfirmed generalization from
+    # '-'; comparisons are now independently ground-truth-confirmed too.
     just_saw_binary_arith_op = False
     # True once any real (non-whitespace) token has been consumed --
     # used only to tell whether a literal is the very FIRST token of this
@@ -854,7 +866,11 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 num_code, str_code = AMBIGUOUS_OP_CODES[op_key]
                 out.append(str_code if last_was_string else num_code)
                 just_saw_value = False
-                if op_key == "+" and not last_was_string:
+                if not last_was_string:
+                    # Every AMBIGUOUS_OP_CODES entry ('+' and all eight
+                    # comparisons) is a binary operator when numeric --
+                    # see just_saw_binary_arith_op's own docstring above
+                    # for the '+' and 'IF a%=1' confirmations.
                     just_saw_binary_arith_op = True
             else:
                 out.append(PFT_CODE_OVERRIDE.get(matched.upper(), code))
