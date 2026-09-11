@@ -508,7 +508,7 @@ _CURRENT_DECLARED_ARRAYS: frozenset[str] = frozenset()
 _CURRENT_DECLARED_DEFFN: frozenset[str] = frozenset()
 
 
-def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False, seed_binary_arith_op: bool = False, seed_force_float_literal: bool = False, assume_not_first: bool = False) -> bytes:
+def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False, seed_binary_arith_op: bool = False, seed_force_float_literal: bool = False, assume_not_first: bool = False, seed_zero_filler: bool = True) -> bytes:
     out = bytearray()
     # Tracks whether the most recently emitted atom (literal, var-ref, or
     # builtin-function call) was string-typed -- used to pick the right
@@ -552,7 +552,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # i%=1' and hex/octal/binary literals reuse the even code too, per
     # the odd/filler branch's own docstring, but aren't re-armed through
     # this array_open mechanism at all, so they don't need tracking here).
-    zero_filler = True
+    zero_filler = seed_zero_filler
     # True right after any value-producing atom (string/numeric literal,
     # var-ref, function call, or a closing ')' or '$'-suffixed builtin) --
     # False right after an operator, '(', ',', or at the very start.
@@ -1240,6 +1240,57 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             last_was_string_literal = False
             paren_depth += 1
             just_saw_value = True
+            if matched_upper == "EVNT_MULTI(":
+                # EVNT_MULTI(mode,15 leading literal/var-ref args,addr%,
+                # timeout) -- only the very LAST argument gets the
+                # odd-filler form; all 15+ leading arguments stay plain,
+                # confirmed 2026-09-10 via COVFULL.LST vs a real
+                # editor's own COVFULL9.GFA. None of the existing
+                # mechanisms fit: the one-shot default only reaches the
+                # FIRST argument, and odd_filler_pending's persistence
+                # gets cleared the instant any leading literal consumes
+                # it (which EVNT_MULTI's own 14 leading zero literals
+                # do immediately). So this call's whole argument list is
+                # manually scanned and split here instead, mirroring
+                # the BSAVE-family bare-statement fix's own "last
+                # argument only" idea but for an SFT call reached from
+                # inside an expression, not a bare statement.
+                depth2 = 1
+                p2 = newpos
+                while p2 < end and depth2 > 0:
+                    if text[p2] == "(":
+                        depth2 += 1
+                    elif text[p2] == ")":
+                        depth2 -= 1
+                    p2 += 1
+                inner = text[newpos : p2 - 1]
+                arg_parts = _split_top_level_commas(inner)
+                # Leading arguments combined into ONE tokenize_expr call
+                # (not split per-argument) so only the true first token
+                # of the whole list gets was_first_token's own default
+                # treatment, and none of the later leading arguments
+                # wrongly get a fresh "first token" state of their own
+                # -- same class of mistake ARECT/DMASOUND/RC_COPY's own
+                # docstrings already warn about.
+                prefix = ",".join(arg_parts[:-1])
+                if prefix:
+                    # array_open=True/seed_zero_filler=False replicates
+                    # the SAME "first SFT argument" default every other
+                    # GFASFT call gets (see the 'else' branch above) --
+                    # its own first token here (a binary literal,
+                    # '&X110000') needs the pair's own even-code filler
+                    # (0xce), not the plain 0x00 this call's normal
+                    # default would otherwise use.
+                    out += tokenize_expr(prefix, 0, len(prefix), pool, array_open=True, seed_zero_filler=False)
+                    out.append(PFT_TEXT_TO_CODE[","])
+                out += tokenize_expr(arg_parts[-1], 0, len(arg_parts[-1]), pool, array_open=True)
+                out.append(PFT_TEXT_TO_CODE[")"])
+                pos = p2
+                paren_depth -= 1
+                last_was_string = False
+                last_was_string_literal = False
+                just_saw_value = True
+                continue
             # Per-function argument-encoding overrides, confirmed
             # 2026-09-10 via COVFULL.LST vs a real editor's own
             # COVFULL9.GFA -- NOT a blanket rule for every GFASFT entry
