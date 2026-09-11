@@ -504,6 +504,18 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # already produces. So the comma-rearm has to gate out the literal
     # case specifically, not just check last_was_string alone.
     last_was_string_literal = False
+    # Depth counter for "currently inside an open PFT_REAL_ARG_FUNCTIONS
+    # call's own argument list" -- confirmed 2026-09-10 via COVFULL.LST
+    # vs a real editor's own COVFULL9.GFA: MAX(/MIN( are the only two
+    # confirmed multi-argument members of that set, and their SECOND
+    # argument ('a%=MAX(3,7)''s 7) also needs pft 223, not just the
+    # first (which the plain per-match flag already covers) -- so the
+    # comma handler below needs to know it's still "inside" the call
+    # across the comma, not just for one token.
+    real_arg_paren_depth = 0
+    # General "inside any function-call/grouping parens" depth counter
+    # (see its own use-site docstring below).
+    paren_depth = 0
     # Which filler-byte VALUE the next odd+filler numeric literal (see
     # array_open below) should use -- True for a plain 0x00, False for
     # the pair's own even code instead. Defaults True to match every
@@ -877,6 +889,22 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             code, newpos = kw
             matched = text[pos:newpos]
             op_key = matched.upper() if matched[:1].isalpha() else matched
+            # General "inside function-call/grouping parens" depth
+            # counter -- see last_was_string_literal's own docstring:
+            # the comma-rearm's string-literal exclusion only applies
+            # AT paren depth > 0 (a function call's own argument list,
+            # e.g. LEFT$("hello",3)); a bare statement's own top-level
+            # comma (paren_depth == 0, e.g. OPEN "R",#3,"random.dat",32)
+            # rearms regardless of literal-vs-variable -- confirmed
+            # 2026-09-10 via COVFULL.LST vs a real editor's own
+            # COVFULL9.GFA: excluding literals unconditionally (this
+            # project's first attempt) fixed LEFT$ but broke OPEN's own
+            # last argument, which needs the same rearm even though
+            # "random.dat" right before its comma is also a literal.
+            if matched.endswith("("):
+                paren_depth += 1
+            elif matched == ")" and paren_depth > 0:
+                paren_depth -= 1
             if op_key == "-" and not just_saw_value:
                 # Unary minus (nothing value-shaped precedes it: start of
                 # the expression, or right after another operator/'('/
@@ -996,7 +1024,11 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # own comment), so only this specific confirmed set.
                     if op_key in WORD_OPERATORS or matched.upper() in PFT_REAL_ARG_FUNCTIONS:
                         just_saw_binary_arith_op = True
-                elif matched == "," and last_was_string and not last_was_string_literal:
+                    if matched.upper() in PFT_REAL_ARG_FUNCTIONS and matched.endswith("("):
+                        real_arg_paren_depth += 1
+                elif matched == "," and real_arg_paren_depth > 0:
+                    just_saw_binary_arith_op = True
+                elif matched == "," and last_was_string and not (last_was_string_literal and paren_depth > 0):
                     # Re-arm the odd+filler literal form (see array_open's
                     # own docstring above) for the numeric argument right
                     # after this comma -- confirmed via RTLIBTS2's own
@@ -1018,6 +1050,8 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # expression or function-call result) -- a '-' right
                     # after it is binary, not unary (e.g. 'FRE(0)-1').
                     just_saw_value = True
+                    if real_arg_paren_depth > 0:
+                        real_arg_paren_depth -= 1
                 elif matched in ("-", "*", "/"):
                     # Binary arithmetic (this '-' already fell through
                     # the unary-minus branch above, so just_saw_value was
@@ -1041,6 +1075,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             matched_upper = matched.upper()
             last_was_string = matched_upper.rstrip("(").endswith("$")
             last_was_string_literal = False
+            paren_depth += 1
             just_saw_value = True
             # Per-function argument-encoding overrides, confirmed
             # 2026-09-10 via COVFULL.LST vs a real editor's own
