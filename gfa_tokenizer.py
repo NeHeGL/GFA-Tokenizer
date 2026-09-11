@@ -174,19 +174,6 @@ PFT_REAL_ARG_FUNCTIONS = {
     "MAX(", "MIN(",
 }
 
-# GEM AES/VDI-family GFASFT builtins whose FIRST argument uses the odd-
-# filler integer form (array_open=True, zero_filler=False -- same
-# mechanism as SUCC(/PRED(''s GFASFT argument) instead of the plain
-# form -- confirmed 2026-09-10 via COVFULL.LST vs a real editor's own
-# COVFULL9.GFA. A clear family pattern (every one of these takes a
-# GEM handle/index as its first argument), but each one still
-# individually confirmed present in the diff, not assumed from the
-# other members alone.
-PFT_ODD_FILLER_FIRST_ARG_FUNCTIONS = {
-    "APPL_READ(", "APPL_WRITE(", "RSRC_GADDR(", "RSRC_SADDR(",
-    "SHEL_GET(", "OBJC_EDIT(", "FORM_BUTTON(",
-}
-
 # LEFT$(/RIGHT$( also each list two PFT codes for the identical display
 # text (58/59, 60/61) -- unlike '+'/the comparisons above, this isn't a
 # numeric-vs-string distinction (both codes are for the same read-only
@@ -529,7 +516,8 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # General "inside any function-call/grouping parens" depth counter
     # (see its own use-site docstring below).
     paren_depth = 0
-    # See PFT_ODD_FILLER_FIRST_ARG_FUNCTIONS' own match-site docstring.
+    # See the GFASFT match-site's own docstring below (the "elif"
+    # branch right after EVEN(/ODD('s force_float_literal check).
     odd_filler_pending = False
     # Which filler-byte VALUE the next odd+filler numeric literal (see
     # array_open below) should use -- True for a plain 0x00, False for
@@ -1160,23 +1148,30 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             # these specifically confirmed ones.
             if matched_upper in ("EVEN(", "ODD("):
                 force_float_literal = True
-            elif matched_upper in ("SUCC(", "PRED("):
-                array_open = True
-                zero_filler = False
-            elif matched_upper in PFT_ODD_FILLER_FIRST_ARG_FUNCTIONS:
-                # Unlike SUCC(/PRED( (whose odd-filler argument is the
-                # very next token), these take one or more leading
+            else:
+                # EVERY OTHER GFASFT function's first LITERAL argument
+                # uses the odd-filler integer form by default -- this
+                # turned out to be the real general rule, not a
+                # per-function allowlist (a first attempt built an
+                # explicit allowlist -- SUCC(/PRED(/APPL_READ(/etc. --
+                # one confirmed case at a time; re-diffing against
+                # COVFULL9.GFA found the SAME shape on a much broader,
+                # unrelated batch: RAND(/DFREE(/STICK(/STRIG(/LOF(/LOC(/
+                # EOF(/INP(/INP?(/INP%(/INP&(/OUT?(/PTST(/FSFIRST('s
+                # second argument -- confirmed 2026-09-10). EVEN(/ODD(
+                # remain the one confirmed exception (force-float
+                # instead). Some SFT calls take one or more leading
                 # variable-reference arguments before their first real
                 # literal (e.g. 'OBJC_EDIT(tree%,obj&,65,...)' -- 65 is
-                # the third token). array_open/zero_filler are one-shot
+                # the third token); array_open/zero_filler are one-shot
                 # (reset every loop iteration), so a plain one-time set
-                # here would be consumed by 'tree%' instead. odd_filler_
-                # pending persists across the intervening var-refs/
-                # commas (re-armed by each, see their own sites below)
-                # until an actual literal consumes it. Also set
-                # array_open/zero_filler directly here too (not just via
-                # odd_filler_pending) for the immediate case (e.g.
-                # 'SHEL_GET(500,...)', no leading var-ref at all).
+                # here would be consumed by 'tree%' instead.
+                # odd_filler_pending persists across the intervening
+                # var-refs/commas (re-armed by each) until an actual
+                # literal consumes it. Also set array_open/zero_filler
+                # directly here too (not just via odd_filler_pending)
+                # for the immediate case (e.g. 'SHEL_GET(500,...)', no
+                # leading var-ref at all).
                 odd_filler_pending = True
                 array_open = True
                 zero_filler = False
