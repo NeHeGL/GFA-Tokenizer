@@ -2652,6 +2652,44 @@ def encode_line(
             _append_comment(out, comment)
             return bytes(out)
 
+    # CONTRL(i)=v / INTIN(i)=v / etc: the 8 built-in VDI/AES parameter-
+    # block pseudo-arrays' own ASSIGNMENT form. Each name has its own
+    # dedicated lcp (no identifier-pool entry at all, unlike a real
+    # user array -- the name is baked into the lcp itself, same
+    # convention as any other _SIMPLE_KEYWORDS statement) -- confirmed
+    # 2026-09-10 via EASYMINT.GFA, a real-world compiled program in
+    # this project's own test corpus whose source (EASYMINT.LST) uses
+    # exactly this assignment form throughout ('CONTRL(0)=101',
+    # 'INTIN(0)=1', 'GCONTRL(0)=48', 'GINTIN(0)=0', all directly
+    # confirmed against its own real compiled bytes). PTSIN/PTSOUT/
+    # INTOUT/GINTOUT's own lcp values are NOT independently confirmed
+    # in EASYMINT.GFA (no assignment to them appears in that file), but
+    # match exactly the numeric codes hell.lst's own DATA table already
+    # confirmed for these same 8 names (see _BUILTIN_BARE_ARRAYS' own
+    # comment) at a consistent +4 spacing that also correctly predicts
+    # CONTRL's own confirmed 912 slotting exactly between GINTOUT (908)
+    # and GCONTRL (916) -- high confidence, not a guess, but flagged
+    # since those 4 aren't independently compiled-and-checked the way
+    # CONTRL/INTIN/GCONTRL/GINTIN are. The index argument uses the same
+    # odd-filler array_open default as any array assignment; the value
+    # is a plain expression, no special treatment.
+    m = re.match(
+        r"^(CONTRL|INTIN|INTOUT|PTSIN|PTSOUT|GCONTRL|GINTIN|GINTOUT)\((.*?)\)\s*=(.*)$",
+        body, re.IGNORECASE,
+    )
+    if m:
+        name_u = m.group(1).upper()
+        lcp = _VDI_ARRAY_ASSIGN_LCP.get(name_u)
+        if lcp is not None:
+            index_expr, rhs = m.group(2), m.group(3)
+            push16(out, lcp)
+            out += tokenize_expr(index_expr, 0, len(index_expr), pool, array_open=True)
+            out.append(PFT_TEXT_TO_CODE[")="])
+            arr_val_lit = _try_bare_int_literal_array_value(rhs)
+            out += arr_val_lit if arr_val_lit is not None else tokenize_expr(rhs, 0, len(rhs), pool)
+            _append_comment(out, comment)
+            return bytes(out)
+
     m = re.match(
         r"^([A-Za-z_][A-Za-z0-9_.]*)([#$%!&|])\((.*?)\)\s*=(.*)$",
         body,
@@ -3739,6 +3777,16 @@ _DIM_BARE_NAME_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\(")
 _BUILTIN_BARE_ARRAYS = {
     "contrl", "intin", "intout", "ptsin", "ptsout",
     "gcontrl", "gintin", "gintout",
+}
+
+# CONTRL/INTIN/etc's own ASSIGNMENT-form lcp -- see the matcher's own
+# comment in encode_line for how these were confirmed (CONTRL/INTIN/
+# GCONTRL/GINTIN directly via EASYMINT.GFA; PTSIN/PTSOUT/INTOUT/
+# GINTOUT via hell.lst's own DATA table, at the same +4 spacing every
+# confirmed value already follows).
+_VDI_ARRAY_ASSIGN_LCP = {
+    "PTSIN": 880, "PTSOUT": 884, "INTIN": 888, "INTOUT": 892,
+    "GINTIN": 904, "GINTOUT": 908, "CONTRL": 912, "GCONTRL": 916,
 }
 
 
