@@ -499,7 +499,7 @@ def _try_match_keyword(text: str, pos: int, table: dict[str, int], max_len: int)
 _CURRENT_DECLARED_ARRAYS: frozenset[str] = frozenset()
 
 
-def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False, seed_binary_arith_op: bool = False, seed_force_float_literal: bool = False) -> bytes:
+def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False, seed_binary_arith_op: bool = False, seed_force_float_literal: bool = False, assume_not_first: bool = False) -> bytes:
     out = bytearray()
     # Tracks whether the most recently emitted atom (literal, var-ref, or
     # builtin-function call) was string-typed -- used to pick the right
@@ -616,7 +616,16 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # above doesn't intercept it) -- needs the same odd+filler form as a
     # bare 'x%=5' does, not the plain form this project previously
     # defaulted every non-array-context literal to.
-    seen_any_token = False
+    # Seeded True when this call is really a continuation of a larger
+    # statement's own token stream (e.g. FOR-loop TO's value in the
+    # no-STEP case -- confirmed 2026-09-10 via COVFULL.LST vs a real
+    # editor's own COVFULL9.GFA: 'FOR a%=1 TO 10''s '10' is plain pft
+    # 200, NOT the odd-filler form a genuinely-fresh call's own "first
+    # token" treatment produces -- caught by a full byte, not just
+    # length, comparison, same lesson as the ARECT/DMASOUND fix above),
+    # so its own first token must NOT get "first token of the whole
+    # statement" treatment.
+    seen_any_token = assume_not_first
     # Set right after emitting an array-reference token ('name(' --
     # already includes the '(' as part of its sigil, see resolve_var);
     # consumed (and cleared) by the very next numeric literal, which
@@ -2230,7 +2239,7 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
             # 10' (no STEP): TO's value (10) is 'c8 00 00 00 0a', NOT
             # pft 223 -- applying this unconditionally regressed that
             # case, so it's gated on step_expr being present.
-            out += tokenize_expr(to_expr, 0, len(to_expr), pool, seed_binary_arith_op=step_expr is not None)
+            out += tokenize_expr(to_expr, 0, len(to_expr), pool, seed_binary_arith_op=step_expr is not None, assume_not_first=step_expr is None)
             if step_expr is not None:
                 out.append(PFT_TEXT_TO_CODE["STEP"])
                 # STEP's own value is a plain integer, sign baked directly
