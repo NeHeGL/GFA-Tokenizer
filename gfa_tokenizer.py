@@ -1148,31 +1148,35 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             # these specifically confirmed ones.
             if matched_upper in ("EVEN(", "ODD("):
                 force_float_literal = True
-            else:
-                # EVERY OTHER GFASFT function's first LITERAL argument
-                # uses the odd-filler integer form by default -- this
-                # turned out to be the real general rule, not a
-                # per-function allowlist (a first attempt built an
-                # explicit allowlist -- SUCC(/PRED(/APPL_READ(/etc. --
-                # one confirmed case at a time; re-diffing against
-                # COVFULL9.GFA found the SAME shape on a much broader,
-                # unrelated batch: RAND(/DFREE(/STICK(/STRIG(/LOF(/LOC(/
-                # EOF(/INP(/INP?(/INP%(/INP&(/OUT?(/PTST(/FSFIRST('s
-                # second argument -- confirmed 2026-09-10). EVEN(/ODD(
-                # remain the one confirmed exception (force-float
-                # instead). Some SFT calls take one or more leading
-                # variable-reference arguments before their first real
+            elif matched_upper in ("OBJC_EDIT(", "FORM_BUTTON("):
+                # These two specifically need the odd-filler treatment
+                # to PERSIST across one or more leading variable-
+                # reference arguments before reaching their first real
                 # literal (e.g. 'OBJC_EDIT(tree%,obj&,65,...)' -- 65 is
-                # the third token); array_open/zero_filler are one-shot
-                # (reset every loop iteration), so a plain one-time set
-                # here would be consumed by 'tree%' instead.
-                # odd_filler_pending persists across the intervening
-                # var-refs/commas (re-armed by each) until an actual
-                # literal consumes it. Also set array_open/zero_filler
-                # directly here too (not just via odd_filler_pending)
-                # for the immediate case (e.g. 'SHEL_GET(500,...)', no
-                # leading var-ref at all).
+                # the third token, after two var-refs) -- confirmed
+                # 2026-09-10 via COVFULL.LST vs a real editor's own
+                # COVFULL9.GFA. Distinct from the plain default just
+                # below: 'SHL(a%,1)''s second argument (also after one
+                # leading var-ref) confirmed staying PLAIN by the SAME
+                # comparison, so persistence-through-var-refs is NOT the
+                # general rule, just these two's own confirmed shape.
                 odd_filler_pending = True
+                array_open = True
+                zero_filler = False
+            else:
+                # EVERY OTHER GFASFT function's own first token, if it's
+                # a literal, uses the odd-filler integer form -- the
+                # general default (a first attempt built an explicit
+                # per-function allowlist one confirmed case at a time;
+                # re-diffing against COVFULL9.GFA found the SAME shape
+                # on a much broader, unrelated batch: RAND(/DFREE(/
+                # STICK(/STRIG(/LOF(/LOC(/EOF(/INP(/INP?(/INP%(/INP&(/
+                # OUT?(/PTST(/FSFIRST('s second argument -- confirmed
+                # 2026-09-10). Deliberately ONE-SHOT (no odd_filler_
+                # pending) -- confirmed via the SAME comparison that a
+                # LATER argument, after a leading var-ref has already
+                # consumed this one-shot set, correctly stays plain
+                # (e.g. 'SHL(a%,1)''s second argument).
                 array_open = True
                 zero_filler = False
             pos = newpos
