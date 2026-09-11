@@ -2571,6 +2571,22 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                 # trigger is still unconfirmed (see _SIMPLE_KEYWORDS'
                 # own comment), left untouched rather than guessed.
                 out += tokenize_expr(rest, 0, len(rest), pool, bare_word_is_label=True)
+            elif lcp in (1616, 444, 448, 852):
+                # BSAVE/BGET/BPUT/BMOVE: the LAST top-level argument
+                # (their own byte-count/length) uses the odd-filler
+                # integer form (array_open=True, zero_filler stays its
+                # own default True) -- confirmed 2026-09-10 via
+                # COVFULL.LST vs a real editor's own COVFULL9.GFA
+                # ('BGET #1,addr%,100''s 100 is 'c9 00 00 00 00 64', not
+                # the plain form the generic tokenize_expr fallthrough
+                # produces for every other argument). Earlier arguments
+                # are untouched -- confirmed the SAME comparison shows
+                # BGET's own first argument (#1) stays plain.
+                parts = _split_top_level_commas(rest)
+                for i, part in enumerate(parts):
+                    if i > 0:
+                        out.append(PFT_TEXT_TO_CODE[","])
+                    out += tokenize_expr(part, 0, len(part), pool, array_open=(i == len(parts) - 1))
             else:
                 out += tokenize_expr(rest, 0, len(rest), pool)
         _append_comment(out, comment)
