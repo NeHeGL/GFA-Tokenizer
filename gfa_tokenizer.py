@@ -903,7 +903,25 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         # through the already-correct dedicated assignment matcher, not
         # this generic expression path) ran fine.
         nm = _NAME_RE.match(text, pos)
-        if nm and text[nm.end() : nm.end() + 1] == "(" and nm.group(0).lower() in _CURRENT_DECLARED_ARRAYS:
+        if (
+            nm
+            and text[nm.end() : nm.end() + 1] == "("
+            and nm.group(0).lower() in _CURRENT_DECLARED_ARRAYS
+            and nm.group(0).lower() not in _BUILTIN_BARE_ARRAYS
+        ):
+            # The 8 VDI-pseudo-array names (CONTRL/INTIN/etc, added to
+            # _CURRENT_DECLARED_ARRAYS below via _BUILTIN_BARE_ARRAYS)
+            # are excluded here even though they're always members of
+            # this set -- unlike a real DIM'd user array, they're only
+            # an array on the ASSIGNMENT side ('CONTRL(0)=101', handled
+            # by encode_line's own dedicated LHS matcher, untouched by
+            # this exclusion). A READ ('a%=CONTRL(0)') is genuinely a
+            # GFASFT function call in real GFA-BASIC (confirmed
+            # 2026-09-10 via COVFULL.LST vs a real editor's own
+            # COVFULL9.GFA: 'a%=CONTRL(0)' uses the ordinary SFT-call
+            # form 'd0 16', not an array reference) -- this exclusion
+            # lets these 8 names fall through to the normal keyword-
+            # matching below, which resolves them correctly on its own.
             idx = pool.get_or_add(4, nm.group(0))
             if idx < 256:
                 out.append(224 + 4)
