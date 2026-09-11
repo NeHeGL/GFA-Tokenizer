@@ -2625,6 +2625,28 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                     if i > 0:
                         out.append(PFT_TEXT_TO_CODE[","])
                     out += tokenize_expr(part, 0, len(part), pool, array_open=(i == 2))
+            elif lcp == 1612:
+                # RECALL: a simple signed-integer argument (e.g. the
+                # '-1' in 'RECALL #1,recallarr$(),-1,reccount%') is a
+                # plain two's-complement pft-200 literal with no unary-
+                # minus rewrite at all -- same shape as FOR-loop STEP's
+                # own fix above, confirmed via the same COVFULL.LST vs
+                # COVFULL9.GFA comparison ('-1' is 'c8 ff ff ff ff', not
+                # the 'opcode 30 + pft 221 packed float' rewrite this
+                # tokenizer's generic unary-minus handling produces).
+                # Only a bare signed-integer argument is special-cased;
+                # anything else (a variable, an expression) falls
+                # through to the general tokenizer unchanged.
+                parts = _split_top_level_commas(rest)
+                for i, part in enumerate(parts):
+                    if i > 0:
+                        out.append(PFT_TEXT_TO_CODE[","])
+                    part_stripped = part.strip()
+                    if re.match(r"^-?\d+$", part_stripped):
+                        out.append(200)
+                        push32(out, int(part_stripped) & 0xFFFFFFFF)
+                    else:
+                        out += tokenize_expr(part, 0, len(part), pool)
             else:
                 out += tokenize_expr(rest, 0, len(rest), pool)
         _append_comment(out, comment)
