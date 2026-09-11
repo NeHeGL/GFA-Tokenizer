@@ -2142,21 +2142,36 @@ def encode_line(
         _append_comment(out, comment)
         return bytes(out)
 
-    # "EVERY STOP" -- lcp 1452 (EVEHOLD in gfalct, the 2nd of EVERY's own
-    # 3 lcp slots, matching the manual's own listed order "EVERY, EVERY
-    # STOP, EVERY CONT") -- confirmed 2026-09-11 via a real-world archive
-    # program's own compiled binary (Hard_Drive/GFA_CODE/Unknown/
-    # FLEXFILE/FLEXFILE.GFA: 'EVERY STOP' -> '05ac 98 46'). The single
-    # extra byte (0x98) after the header isn't understood (not the usual
-    # 4-byte HEADER_SKIP4_LCP shape, and no argument expression follows
-    # a bare STOP/CONT statement) -- copied verbatim from the one
-    # confirmed real example rather than guessed at. EVERY CONT/AFTER
-    # STOP/AFTER CONT (EVECONT/AFTHOLD/AFTCONT) remain unconfirmed and
-    # unhandled -- no matching real .GFA found for those forms yet.
-    m = re.match(r"^EVERY\s+STOP\s*$", body, re.IGNORECASE)
+    # "EVERY STOP"/"AFTER STOP"/"EVERY CONT"/"AFTER CONT" -- each
+    # keyword's own 2nd/3rd lcp slot (EVEHOLD/EVECONT/AFTHOLD/AFTCONT in
+    # gfalct, matching the manual's own listed order "EVERY, EVERY
+    # STOP, EVERY CONT" / "AFTER, AFTER STOP, AFTER CONT"). Both STOP
+    # forms are directly confirmed 2026-09-11 via two independent real-
+    # world archive programs' own compiled binaries: EVERY STOP ->
+    # '05ac 98 46' (Hard_Drive/GFA_CODE/Unknown/FLEXFILE/FLEXFILE.GFA,
+    # lcp 1452) and AFTER STOP -> '05b8 98 46' (the SAME file, lcp
+    # 1464) -- landing EXACTLY on the +12-from-base/+4-between-forms
+    # slot spacing this comment predicts. The trailing byte (0x98) is
+    # NOT an inert filler (an earlier version of this fix assumed it
+    # was, and reused it verbatim for CONT too -- confirmed wrong: it
+    # decodes as GFAPFT code 152, literally the keyword 'STOP', so the
+    # real shape is 'EVERY '/'AFTER ' (from the header lcp) followed by
+    # an ordinary trailing GFAPFT keyword token, same generic mechanism
+    # as any other statement body). CONT's own GFAPFT code is 154
+    # (0x9a, 'CONT', confirmed present in the table right next to
+    # STOP's own 152) -- used here for the two CONT forms. Their own
+    # lcp values (1456, 1468) are NOT independently confirmed by a real
+    # compile -- no matching .GFA using either was found in this
+    # project's own archive -- but inferred with high confidence from
+    # the now-doubly-confirmed STOP pattern (same +4 spacing, same
+    # manual ordering).
+    m = re.match(r"^(EVERY|AFTER)\s+(STOP|CONT)\s*$", body, re.IGNORECASE)
     if m:
-        push16(out, 1452)
-        out.append(0x98)
+        kw, form = m.group(1).upper(), m.group(2).upper()
+        lcp = {("EVERY", "STOP"): 1452, ("EVERY", "CONT"): 1456,
+               ("AFTER", "STOP"): 1464, ("AFTER", "CONT"): 1468}[(kw, form)]
+        push16(out, lcp)
+        out.append(152 if form == "STOP" else 154)
         _append_comment(out, comment)
         return bytes(out)
 
