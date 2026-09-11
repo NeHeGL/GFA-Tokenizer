@@ -751,7 +751,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         num = parse_number(text, pos)
         if num is not None:
             value, is_float, newpos, base = num
-            if was_binary_arith_op and base == 10:
+            if (was_binary_arith_op or (was_pending_unary_minus and was_array_open)) and base == 10:
                 # See just_saw_binary_arith_op's own docstring above:
                 # a plain literal (integer or float) right after a
                 # BINARY arithmetic operator uses pft 223 -- the packed
@@ -761,6 +761,15 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 # confirmed; &H/&O/&X literals in this position fall
                 # through to the older, separately-unconfirmed forms
                 # below rather than guessing at this shape for them too.
+                # The was_array_open combo covers a unary minus that's
+                # ALSO an enclosing SFT call's own first-argument default
+                # (e.g. 'SGN(-5)') -- confirmed 2026-09-10 via
+                # COVFULL.LST vs a real editor's own COVFULL9.GFA: this
+                # still emits opcode 30 (the unary minus) right before,
+                # but the OPERAND itself takes pft 223 (magnitude only,
+                # sign already conveyed by opcode 30), not the plain
+                # unary-minus pft 221 form -- array_open's own default
+                # takes priority here.
                 float_bytes = bytearray(double_to_gfa_float(value))
                 float_bytes[0] |= 0x80
                 out.append(223)
@@ -776,14 +785,19 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 # used to encode it. So EVERY float literal -- negated or
                 # not -- uses pft 221: the payload is always the packed
                 # float of the ABSOLUTE value with its own first byte's
-                # top bit forced set, preceded by one marker byte that's
-                # 0x80 when a unary minus produced this literal (the
-                # value's actual sign) and 0x00 otherwise. A plain
-                # (non-float) integer right after a unary minus
-                # (confirmed only via gb36test_archive/hell.gfa's own
-                # 'token&=-1'/'z&=-1') reuses this exact same shape too
-                # (marker 0x80, packed float of the integer's absolute
-                # value) -- unary-minus + a non-float, non-base-10-
+                # top bit forced set, preceded by one marker byte. A
+                # plain (non-float) INTEGER right after a unary minus
+                # (confirmed via gb36test_archive/hell.gfa's own
+                # 'token&=-1'/'z&=-1') uses marker 0x80 (signaling "this
+                # packed float actually started life as a negated plain
+                # integer"). A genuine FLOAT literal right after a unary
+                # minus (confirmed 2026-09-10 via COVFULL.LST vs a real
+                # editor's own COVFULL9.GFA: 'ABS(-3.5)', 'FIX(-3.7)')
+                # uses marker 0x00 instead, same as a float literal with
+                # no unary minus at all -- the sign is already fully
+                # captured by byte0's forced top bit, so a float doesn't
+                # get the extra "was this originally an int" signal an
+                # integer operand does. Unary-minus + a non-base-10
                 # integer literal (hex/octal/binary) has no ground truth
                 # either way yet, so that case still falls through to the
                 # separate '0 - operand' rewrite below instead of
@@ -791,7 +805,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 float_bytes = bytearray(double_to_gfa_float(abs(value)))
                 float_bytes[0] |= 0x80
                 out.append(221)
-                out.append(0x80 if was_pending_unary_minus else 0x00)
+                out.append(0x80 if (was_pending_unary_minus and not is_float) else 0x00)
                 out += float_bytes
             elif was_first_token and not was_array_open:
                 # The very first token of this tokenize_expr call, but
@@ -1047,28 +1061,46 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 # Unary minus (nothing value-shaped precedes it: start of
                 # the expression, or right after another operator/'('/
                 # ','). Opcode 30's packed-float operand encoding (see
-                # pending_unary_minus' own docstring) is confirmed ONLY
-                # for an immediately-following plain INTEGER literal
-                # ('z%=-1') -- a first version of this fix applied it to
-                # ANY unary '-' (variable operands like '-x%', float
-                # literals like '-3.5' too) and the real editor rejected
-                # both of those ("3 bombs" on load/compile, confirmed by
-                # the user against UNARYTST.GFA). For anything else,
-                # rewrite as '0 - operand' instead: a plain 0 literal
-                # (already-confirmed encoding) plus the already-confirmed
-                # BINARY minus, letting the operand tokenize completely
-                # normally right after -- semantically identical, and
-                # doesn't require guessing at another unconfirmed byte
-                # shape the way extending the packed-float trick would.
+                # pending_unary_minus' own docstring) is confirmed for an
+                # immediately-following plain base-10 literal, INTEGER
+                # ('z%=-1') or FLOAT ('ABS(-3.5)', 'FIX(-3.7)' --
+                # confirmed 2026-09-10 via COVFULL.LST vs a real editor's
+                # own COVFULL9.GFA, extending what was previously only
+                # confirmed for integers) -- a first version of this fix
+                # applied it to ANY unary '-' including variable operands
+                # like '-x%', and the real editor rejected that ("3
+                # bombs" on load/compile, confirmed by the user against
+                # UNARYTST.GFA), so it's still gated on a literal operand
+                # specifically. For anything else (a variable, a
+                # function call, &H/&O/&X literals), rewrite as
+                # '0 - operand' instead: a plain 0 literal (already-
+                # confirmed encoding) plus the already-confirmed BINARY
+                # minus, letting the operand tokenize completely normally
+                # right after -- semantically identical, and doesn't
+                # require guessing at another unconfirmed byte shape the
+                # way extending the packed-float trick would.
                 peek = parse_number(text, newpos)
-                if peek is not None and not peek[1] and peek[3] == 10:
-                    # Confirmed only for a plain base-10 integer literal
-                    # ('z%=-1') -- &H/&O/&X literals fall through to the
-                    # '0 - operand' rewrite below, same as float/variable/
+                if peek is not None and peek[3] == 10:
+                    # Confirmed only for a plain base-10 literal ('z%=-1',
+                    # 'ABS(-3.5)') -- &H/&O/&X literals fall through to
+                    # the '0 - operand' rewrite below, same as variable/
                     # function-call operands, since there's no evidence
                     # either way for those bases specifically.
                     out.append(30)
                     pending_unary_minus = True
+                    if was_array_open:
+                        # The '-' token itself doesn't produce a value,
+                        # so it would otherwise silently swallow the
+                        # array_open/zero_filler signal an enclosing
+                        # SFT call's own first-argument default set for
+                        # this position (e.g. 'SGN(-5)') -- re-arm both
+                        # so the literal right after this unary minus
+                        # still gets that default's own treatment
+                        # (pft 223, not 221 -- see the literal-encoding
+                        # branch's own docstring for why array_open
+                        # takes priority here) instead of losing it.
+                        array_open = True
+                        zero_filler = False
                     pos = newpos
                 else:
                     # This injected '0' is a real literal token in its
@@ -1166,7 +1198,20 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # value" for the next '-'/unary-minus check.
                     last_was_string = matched.rstrip("(").endswith("$")
                     last_was_string_literal = False
-                    just_saw_value = op_key not in WORD_OPERATORS
+                    # A keyword match ending in '(' (a function call's
+                    # own OPENING paren, e.g. 'ABS(') hasn't produced a
+                    # value yet -- it's the START of a fresh argument
+                    # list, same as a plain grouping '(' -- so a '-'
+                    # immediately after it is UNARY, not binary. Without
+                    # this, 'ABS(-3.5)' wrongly took the binary-minus
+                    # path (opcode 5 + pft 223) instead of the real
+                    # compiler's own unary form (opcode 30 + pft 221) --
+                    # confirmed real and broad 2026-09-10 via COVFULL.LST
+                    # vs a real editor's own COVFULL9.GFA (also hit
+                    # FIX(-3.7); by inspection this affects EVERY
+                    # function call whose first argument is a negative
+                    # literal, not just these two).
+                    just_saw_value = (op_key not in WORD_OPERATORS) and not matched.endswith("(")
                     # Same pft-223 rule as AMBIGUOUS_OP_CODES' operators
                     # (see just_saw_binary_arith_op's own docstring) --
                     # confirmed 2026-09-10 via COVFULL.LST vs a real
@@ -1239,7 +1284,14 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             last_was_string = matched_upper.rstrip("(").endswith("$")
             last_was_string_literal = False
             paren_depth += 1
-            just_saw_value = True
+            # Same fix as the GFAPFT keyword branch above: a match
+            # ending in '(' is a function call's own OPENING paren, not
+            # a produced value yet, so a '-' right after it (e.g.
+            # 'SGN(-5)') must be UNARY, not binary -- confirmed real
+            # 2026-09-10 via COVFULL.LST vs COVFULL9.GFA. A bare
+            # GFASFT constant with no arguments at all (e.g. CRSLIN,
+            # MOUSEX, no trailing '(') genuinely has produced a value.
+            just_saw_value = not matched_upper.endswith("(")
             if matched_upper == "EVNT_MULTI(":
                 # EVNT_MULTI(mode,15 leading literal/var-ref args,addr%,
                 # timeout) -- only the very LAST argument gets the
