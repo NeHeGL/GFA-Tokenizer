@@ -341,6 +341,25 @@ class IdentPool:
 _SIGILS = sorted(SUFFIX_TO_TYPE.keys(), key=len, reverse=True)
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 
+# These two names DO have a GFASFT table entry (FORM_ALERT( at index
+# 0x9f, V_CLSVWK( -- with literally empty parens -- at 0x6c), yet a
+# real GFA-BASIC 3.60TT editor's own compile of BOTH ('a%=FORM_ALERT
+# (1,addr%)', '~V_CLSVWK(vvh%)') resolves them as ordinary bare TYPE-4
+# ARRAY references instead of the expected SFT-call form -- confirmed
+# 2026-09-10 via COVFULL.LST vs a real editor's own COVFULL9.GFA, by
+# directly inspecting COVFULL9.GFA's own identifier pool: its type-4
+# (array) group literally contains 'form_alert' and 'v_clsvwk' as
+# stored names. The likely explanation (not confirmed further): this
+# reference GFASFT table -- built from a later/different GFA-BASIC
+# version's own documentation -- includes entries the actual 3.60TT
+# compiler's own keyword table doesn't have, so ITS OWN matcher never
+# even tries the SFT form for these two names, falling straight to the
+# generic bare-identifier-followed-by-'(' array default. Whatever the
+# exact cause, the fix is the same either way: treat these two
+# specific names as arrays instead of attempting the SFT match, same
+# as the CONTRL-family's own read-path resolution just below.
+_FALLBACK_AS_ARRAY_NAMES = {"form_alert", "v_clsvwk"}
+
 
 def parse_var_ref(text: str, pos: int) -> tuple[int, str, bool, int] | None:
     """If a variable reference starts at pos, returns (type, name, is_array,
@@ -906,8 +925,10 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         if (
             nm
             and text[nm.end() : nm.end() + 1] == "("
-            and nm.group(0).lower() in _CURRENT_DECLARED_ARRAYS
-            and nm.group(0).lower() not in _BUILTIN_BARE_ARRAYS
+            and (
+                (nm.group(0).lower() in _CURRENT_DECLARED_ARRAYS and nm.group(0).lower() not in _BUILTIN_BARE_ARRAYS)
+                or nm.group(0).lower() in _FALLBACK_AS_ARRAY_NAMES
+            )
         ):
             # The 8 VDI-pseudo-array names (CONTRL/INTIN/etc, added to
             # _CURRENT_DECLARED_ARRAYS below via _BUILTIN_BARE_ARRAYS)
