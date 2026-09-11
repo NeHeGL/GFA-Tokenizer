@@ -154,6 +154,26 @@ STRING_VST_TYPES = {1, 5}
 # a value.
 WORD_OPERATORS = {"AND", "OR", "XOR", "IMP", "EQV", "MOD", "DIV", "NOT"}
 
+# GFAPFT builtins whose argument is coerced to REAL (pft 223, same as a
+# literal right after a binary/comparison operator) regardless of the
+# literal's own source-text shape -- confirmed 2026-09-10 via
+# COVFULL.LST vs a real editor's own COVFULL9.GFA (the companion GFA
+# Decompiler project's coverage-test corpus). Deliberately NOT a
+# blanket "every function argument" rule: FACT(/STR$(/CHR$(/SPACE$(/
+# HEX$(/OCT$(/BIN$(/DIR$(/INPUT$(/ERR$(/CVI(/CVL( are all confirmed
+# NOT wanting this (plain-integer argument instead) from the same
+# comparison -- a first, broader attempt at this fix regressed all of
+# those. MAX(/MIN( confirmed only for their FIRST argument so far (the
+# comma-repeat case for a second/later argument isn't handled by this
+# per-keyword flag alone, same limitation as array_open's own single-
+# shot nature).
+PFT_REAL_ARG_FUNCTIONS = {
+    "SQR(", "SIN(", "COS(", "TAN(", "ATN(", "EXP(", "LOG(", "LOG10(",
+    "ACOS(", "ASIN(", "COSQ(", "SINQ(", "DEG(", "RAD(",
+    "INT(", "ROUND(", "FRAC(", "TRUNC(", "RND(", "RANDOM(",
+    "MAX(", "MIN(",
+}
+
 # LEFT$(/RIGHT$( also each list two PFT codes for the identical display
 # text (58/59, 60/61) -- unlike '+'/the comparisons above, this isn't a
 # numeric-vs-string distinction (both codes are for the same read-only
@@ -466,7 +486,7 @@ def _try_match_keyword(text: str, pos: int, table: dict[str, int], max_len: int)
 _CURRENT_DECLARED_ARRAYS: frozenset[str] = frozenset()
 
 
-def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False) -> bytes:
+def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False, seed_binary_arith_op: bool = False) -> bytes:
     out = bytearray()
     # Tracks whether the most recently emitted atom (literal, var-ref, or
     # builtin-function call) was string-typed -- used to pick the right
@@ -510,6 +530,19 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # best guess pending a real compile to confirm it, not itself
     # independently ground-truth-checked yet.
     pending_unary_minus = False
+    # Set for exactly one iteration right after matching a GFASFT
+    # function whose argument is coerced to REAL regardless of the
+    # literal's own source-text shape (confirmed 2026-09-10 via
+    # COVFULL.LST vs a real editor's own COVFULL9.GFA: 'a%=EVEN(4)''s
+    # bare-integer '4' argument is 'dd 00' + double_to_gfa_float(4.0) --
+    # pft 221, the SAME default packed-float form a genuine float literal
+    # like 'c#=3.14' gets, not the plain-integer form its own text would
+    # normally produce). Only EVEN(/ODD( confirmed so far; SUCC(/PRED( --
+    # also GFASFT -- do NOT get this (confirmed wanting the plain
+    # odd+filler integer form instead, see force_odd_filler below), so
+    # this can't be a blanket "any GFASFT argument" rule -- each GFASFT
+    # entry needs its own confirmation before being added here.
+    force_float_literal = False
     # Set for exactly one iteration right after emitting a BINARY
     # arithmetic OR comparison operator ('+', '-', '*', '/', '=', '<>',
     # '<', '>', '<=', '>=' with a real value before it -- string '+'
@@ -537,7 +570,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # (comparisons share that same table). Fixed to cover all of them --
     # '*'/'/' were already a reasoned-but-unconfirmed generalization from
     # '-'; comparisons are now independently ground-truth-confirmed too.
-    just_saw_binary_arith_op = False
+    just_saw_binary_arith_op = seed_binary_arith_op
     # True once any real (non-whitespace) token has been consumed --
     # used only to tell whether a literal is the very FIRST token of this
     # tokenize_expr call (see the odd+filler-vs-plain literal choice
@@ -572,6 +605,23 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # this project's tokenizer output byte-for-byte once seeded this way.
     while pos < end:
         c = text[pos]
+        if c == " ":
+            # Skipped BEFORE the one-shot flag rotation below (not
+            # after) -- confirmed 2026-09-10 via COVFULL.LST vs a real
+            # editor's own COVFULL9.GFA: 'a%=a% MOD 3' needs its '3' to
+            # see just_saw_binary_arith_op from the 'MOD' token two
+            # characters back, but rotating these flags on the
+            # intervening space's own iteration (the previous version
+            # of this loop did the rotation unconditionally, THEN
+            # checked for space) silently lost every one of them across
+            # any whitespace -- confirmed broken for every WORD_OPERATOR
+            # ('a% MOD 3'/'a% DIV 3'/etc. always have a space before
+            # their operand in valid syntax, so this bug fired on all
+            # of them) and would equally have broken a spaced comparison
+            # ('IF a% = 1') or PFT_REAL_ARG_FUNCTIONS call had either
+            # appeared with a space in the corpus tested so far.
+            pos += 1
+            continue
         # Consumed by this iteration's branches below (the numeric-
         # literal one specifically); cleared for every OTHER kind of
         # token automatically, and re-armed only by the var-ref branch
@@ -579,10 +629,8 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         was_array_open, array_open = array_open, False
         was_zero_filler, zero_filler = zero_filler, True
         was_pending_unary_minus, pending_unary_minus = pending_unary_minus, False
+        was_force_float_literal, force_float_literal = force_float_literal, False
         was_binary_arith_op, just_saw_binary_arith_op = just_saw_binary_arith_op, False
-        if c == " ":
-            pos += 1
-            continue
         was_first_token, seen_any_token = not seen_any_token, True
         if c == '"':
             close = text.find('"', pos + 1)
@@ -614,7 +662,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 float_bytes[0] |= 0x80
                 out.append(223)
                 out += float_bytes
-            elif was_pending_unary_minus or is_float:
+            elif was_pending_unary_minus or is_float or was_force_float_literal:
                 # pft 219 (a plain packed float with no sign byte) is
                 # NEVER actually used by the real compiler for a bare
                 # literal -- confirmed 2026-08-25 via TESTVEX.GFA, a real
@@ -801,9 +849,18 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         kw_len = (kw[1] - pos) if kw is not None else -1
         sft_len = (sft[1] - pos) if sft is not None else -1
         best = max(var_len, kw_len, sft_len)
+        # 'SUCC('/'PRED(' are the only two keywords (besides '*', already
+        # unambiguous) present in BOTH GFAPFT and GFASFT -- confirmed
+        # 2026-09-10 via COVFULL.LST vs a real editor's own COVFULL9.GFA:
+        # the real compiler always emits the GFASFT form ('d0'+sft-index,
+        # e.g. 'a%=SUCC(5)' -> 'd0 60 c9 c8 00 00 00 05'), but this
+        # tokenizer's tie-break (kw_len checked before sft_len below)
+        # always picked the GFAPFT single-byte form instead, producing an
+        # entirely different, wrong-length opcode.
+        prefer_sft = kw_len == best and sft_len == best and text[pos:pos + kw_len].upper() in ("SUCC(", "PRED(")
         if best == -1:
             pass
-        elif kw_len == best:
+        elif kw_len == best and not prefer_sft:
             code, newpos = kw
             matched = text[pos:newpos]
             op_key = matched.upper() if matched[:1].isalpha() else matched
@@ -909,6 +966,22 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # value" for the next '-'/unary-minus check.
                     last_was_string = matched.rstrip("(").endswith("$")
                     just_saw_value = op_key not in WORD_OPERATORS
+                    # Same pft-223 rule as AMBIGUOUS_OP_CODES' operators
+                    # (see just_saw_binary_arith_op's own docstring) --
+                    # confirmed 2026-09-10 via COVFULL.LST vs a real
+                    # editor's own COVFULL9.GFA for two separate groups:
+                    # WORD_OPERATORS' RHS operand ('a%=a% MOD 3''s 3 is
+                    # 'df c0 00 00 00 00 00 04 00', not the plain '3'
+                    # this tokenizer produced), and a specific, confirmed
+                    # set of GFAPFT builtins whose argument is coerced to
+                    # REAL regardless of the literal's own shape (same
+                    # idea as force_float_literal for GFASFT, just via
+                    # the pft-223 no-marker form instead of pft 221) --
+                    # NOT every function (FACT(/STR$(/SUCC(/etc. confirmed
+                    # NOT wanting this -- see PFT_REAL_ARG_FUNCTIONS'
+                    # own comment), so only this specific confirmed set.
+                    if op_key in WORD_OPERATORS or matched.upper() in PFT_REAL_ARG_FUNCTIONS:
+                        just_saw_binary_arith_op = True
                 elif matched == "," and last_was_string:
                     # Re-arm the odd+filler literal form (see array_open's
                     # own docstring above) for the numeric argument right
@@ -951,8 +1024,19 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             out.append(208)
             out.append(code)
             matched = text[pos:newpos]
-            last_was_string = matched.rstrip("(").upper().endswith("$")
+            matched_upper = matched.upper()
+            last_was_string = matched_upper.rstrip("(").endswith("$")
             just_saw_value = True
+            # Per-function argument-encoding overrides, confirmed
+            # 2026-09-10 via COVFULL.LST vs a real editor's own
+            # COVFULL9.GFA -- NOT a blanket rule for every GFASFT entry
+            # (see force_float_literal's own docstring above), only
+            # these specifically confirmed ones.
+            if matched_upper in ("EVEN(", "ODD("):
+                force_float_literal = True
+            elif matched_upper in ("SUCC(", "PRED("):
+                array_open = True
+                zero_filler = False
             pos = newpos
             continue
         else:
@@ -1949,10 +2033,40 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
             # -- so only start_expr is seeded, not to_expr/step_expr.
             out += tokenize_expr(start_expr, 0, len(start_expr), pool, array_open=True)
             out.append(PFT_TEXT_TO_CODE["TO"])
-            out += tokenize_expr(to_expr, 0, len(to_expr), pool)
+            # TO's own value uses pft 223 (the same "right after a binary
+            # operator" form -- see just_saw_binary_arith_op's own
+            # docstring) -- but ONLY when this FOR loop also has an
+            # explicit STEP clause (a different LCP entirely,
+            # FOR_STEP_EXPR_LCP vs FOR_NO_STEP_LCP -- confirmed via a
+            # real editor's own 'FOR a%=10 TO 1 STEP -1': TO's value (1)
+            # is 'df 80 00 00 00 00 00 03 ff'). A step-LESS loop's TO
+            # value stays plain instead -- confirmed via 'FOR a%=1 TO
+            # 10' (no STEP): TO's value (10) is 'c8 00 00 00 0a', NOT
+            # pft 223 -- applying this unconditionally regressed that
+            # case, so it's gated on step_expr being present.
+            out += tokenize_expr(to_expr, 0, len(to_expr), pool, seed_binary_arith_op=step_expr is not None)
             if step_expr is not None:
                 out.append(PFT_TEXT_TO_CODE["STEP"])
-                out += tokenize_expr(step_expr, 0, len(step_expr), pool)
+                # STEP's own value is a plain integer, sign baked directly
+                # into a two's-complement pft-200 literal -- confirmed
+                # 2026-09-10 via a real editor's own 'FOR a%=10 TO 1 STEP
+                # -1'/'FOR a%=1 TO 10 STEP 2': '-1' is 'c8 ff ff ff ff'
+                # (no unary-minus opcode 30, no pft-221 packed-float
+                # rewrite at all -- the sign is just baked into the plain
+                # 32-bit value) and '2' is 'c8 00 00 00 02' (plain, no
+                # skip byte -- NOT the odd-filler form a fresh
+                # tokenize_expr call's was_first_token would otherwise
+                # produce). Only a simple signed-integer STEP value is
+                # handled this way; anything else (a variable, an
+                # expression) falls through to the general tokenizer,
+                # unconfirmed shape, not guessed at.
+                step_stripped = step_expr.strip()
+                step_num_m = re.match(r"^-?\d+$", step_stripped)
+                if step_num_m:
+                    out.append(200)
+                    push32(out, int(step_stripped) & 0xFFFFFFFF)
+                else:
+                    out += tokenize_expr(step_expr, 0, len(step_expr), pool)
             _append_comment(out, comment)
             return bytes(out)
 
