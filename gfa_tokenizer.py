@@ -495,6 +495,15 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
     # (',', '(', ')') so a parenthesized/argument-list boundary doesn't
     # lose track of the enclosing expression's own type.
     last_was_string = False
+    # True only right after a string LITERAL specifically (not a string
+    # VARIABLE) -- confirmed 2026-09-10 via COVFULL.LST vs a real
+    # editor's own COVFULL9.GFA: 'LEFT$("hello",3)''s count argument
+    # (3) wants the PLAIN form, contradicting the earlier RTLIBTS2-
+    # confirmed 'LEFT$(c$,3)' (a string VARIABLE first argument, not a
+    # literal), which needs the odd-filler form the comma-rearm below
+    # already produces. So the comma-rearm has to gate out the literal
+    # case specifically, not just check last_was_string alone.
+    last_was_string_literal = False
     # Which filler-byte VALUE the next odd+filler numeric literal (see
     # array_open below) should use -- True for a plain 0x00, False for
     # the pair's own even code instead. Defaults True to match every
@@ -643,6 +652,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             out += raw
             pos = close + 1
             last_was_string = True
+            last_was_string_literal = True
             just_saw_value = True
             continue
         num = parse_number(text, pos)
@@ -759,6 +769,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 push32(out, int(value))
             pos = newpos
             last_was_string = False
+            last_was_string_literal = False
             just_saw_value = True
             continue
         # A word operator (MOD/DIV/AND/...) glued directly onto a
@@ -788,6 +799,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 pos += wm.end()
                 just_saw_value = False
                 last_was_string = False
+                last_was_string_literal = False
                 continue
         # A bare (unsuffixed) name immediately followed by '(' that's a
         # KNOWN declared array (DIM'd bare earlier in the file) is read
@@ -828,6 +840,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             array_open = True
             zero_filler = True
             last_was_string = False
+            last_was_string_literal = False
             just_saw_value = True
             continue
         # Try a variable/array reference AND both keyword tables, then take
@@ -965,6 +978,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # like AND/OR/MOD/DIV/NOT) counts as "just saw a
                     # value" for the next '-'/unary-minus check.
                     last_was_string = matched.rstrip("(").endswith("$")
+                    last_was_string_literal = False
                     just_saw_value = op_key not in WORD_OPERATORS
                     # Same pft-223 rule as AMBIGUOUS_OP_CODES' operators
                     # (see just_saw_binary_arith_op's own docstring) --
@@ -982,7 +996,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                     # own comment), so only this specific confirmed set.
                     if op_key in WORD_OPERATORS or matched.upper() in PFT_REAL_ARG_FUNCTIONS:
                         just_saw_binary_arith_op = True
-                elif matched == "," and last_was_string:
+                elif matched == "," and last_was_string and not last_was_string_literal:
                     # Re-arm the odd+filler literal form (see array_open's
                     # own docstring above) for the numeric argument right
                     # after this comma -- confirmed via RTLIBTS2's own
@@ -1026,6 +1040,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             matched = text[pos:newpos]
             matched_upper = matched.upper()
             last_was_string = matched_upper.rstrip("(").endswith("$")
+            last_was_string_literal = False
             just_saw_value = True
             # Per-function argument-encoding overrides, confirmed
             # 2026-09-10 via COVFULL.LST vs a real editor's own
@@ -1068,6 +1083,7 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
                 continue
             idx = pool.get_or_add(type_, name)
             last_was_string = type_ in STRING_VST_TYPES
+            last_was_string_literal = False
             just_saw_value = True
             # Real GFA-BASIC uses the byte-sized var-index form
             # (pft 224-239) whenever the pool index fits in a byte,
@@ -2661,6 +2677,13 @@ _SIMPLE_KEYWORDS = {
     "OUT&": 1680, "OUT%": 1684, "RESERVE": 416, "BPUT": 448, "BGET": 444,
     "ARRAYFILL": 1588, "LINE INPUT": 616, "BMOVE": 852, "DELETE": 1404,
     "CLS": 1260,
+    # Confirmed 2026-09-10 via COVFULL.LST vs a real editor's own
+    # COVFULL9.GFA (companion GFA Decompiler project): bare 'MONITOR'
+    # (lcp 192, from GFALCT index 48) was simply missing from this
+    # dict, so it fell through to being tokenized as an ordinary bare
+    # identifier/expression statement instead -- wrong lcp (240) and
+    # two spurious extra bytes for a fabricated variable reference.
+    "MONITOR": 192,
     "DO WHILE": 196, "DO UNTIL": 200, "LOOP WHILE": 204, "LOOP UNTIL": 208,
     "ELSE IF": 64,
     # lcp=1024 confirmed directly from ground truth: sky.lst's own GFALCT
