@@ -484,6 +484,9 @@ def _try_match_keyword(text: str, pos: int, table: dict[str, int], max_len: int)
 # variable scoped to "the line currently being encoded" is safe and
 # far less invasive than a signature change everywhere.
 _CURRENT_DECLARED_ARRAYS: frozenset[str] = frozenset()
+# Same idea, for DEFFN-declared function names -- see
+# _scan_declared_deffn_names' own docstring.
+_CURRENT_DECLARED_DEFFN: frozenset[str] = frozenset()
 
 
 def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bool = False, bare_word_is_label: bool = False, seed_binary_arith_op: bool = False, seed_force_float_literal: bool = False, assume_not_first: bool = False) -> bytes:
@@ -911,6 +914,36 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
             pos = nm.end() + 1
             array_open = True
             zero_filler = True
+            last_was_string = False
+            last_was_string_literal = False
+            just_saw_value = True
+            continue
+        # Same idea as the declared-array check just above, but for a
+        # bare 'name(' that's a KNOWN DEFFN-declared function -- without
+        # this, calling a DEFFN'd function from anywhere other than its
+        # own declaration line falls through to the same wrong default-
+        # scalar resolution the array case above fixes, rendering back
+        # as 'name#(...)' instead of 'name(...)' -- confirmed real via
+        # this project's own regression_tests/edge_cases.lst ('DEFFN
+        # double(n%)=n%*2' / 'PRINT double(21)') and COVFULL.LST
+        # ('DEFFN dbl(n%)=n%*2' called via 'a%=FN dbl(5)').
+        if nm and text[nm.end() : nm.end() + 1] == "(" and nm.group(0).lower() in _CURRENT_DECLARED_DEFFN:
+            idx = pool.get_or_add(14, nm.group(0))
+            if idx < 256:
+                out.append(224 + 14)
+                out.append(idx)
+            else:
+                out.append(240 + 14)
+                push16(out, idx)
+            pos = nm.end() + 1
+            out.append(PFT_TEXT_TO_CODE["("])
+            paren_depth += 1
+            # First argument literal gets the odd-filler form, same
+            # default every GFASFT call's own first argument gets --
+            # confirmed 2026-09-10 via COVFULL.LST vs COVFULL9.GFA
+            # ('a%=FN dbl(5)''s '5' is odd-filler, not plain).
+            array_open = True
+            zero_filler = False
             last_was_string = False
             last_was_string_literal = False
             just_saw_value = True
@@ -1557,7 +1590,12 @@ def _split_trailing_comment(text: str) -> tuple[str, str | None]:
     return text, None
 
 
-def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozenset()) -> bytes:
+def encode_line(
+    text: str,
+    pool: IdentPool,
+    declared_arrays: set[str] = frozenset(),
+    declared_deffn: set[str] = frozenset(),
+) -> bytes:
     """Encodes one source line's CONTENT bytes (no outer 2-byte size
     prefix -- the caller adds that). Returns b'' for a blank line (encoded
     by the caller as a bare REM, matching what real files contain for
@@ -1568,9 +1606,15 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     recognize bare array-element assignment ('arr(i)=5' with no sigil)
     without guessing at every bare 'name(...)=...' being an array. See
     that matcher's own comment for why a blanket rule isn't safe.
+
+    declared_deffn: lowercased DEFFN-declared function names anywhere in
+    the file (see _scan_declared_deffn_names' own docstring) -- same
+    idea, for recognizing a bare 'name(...)' call as a DEFFN function
+    reference instead of a plain scalar.
     """
-    global _CURRENT_DECLARED_ARRAYS
+    global _CURRENT_DECLARED_ARRAYS, _CURRENT_DECLARED_DEFFN
     _CURRENT_DECLARED_ARRAYS = frozenset(declared_arrays)
+    _CURRENT_DECLARED_DEFFN = frozenset(declared_deffn)
     stripped = text.strip()
     body = stripped
     comment: tuple[int, str] | None = None
@@ -3522,6 +3566,32 @@ def _scan_declared_bare_arrays(lines: list[str]) -> set[str]:
     return declared
 
 
+_DEFFN_DECL_RE = re.compile(r"^\s*DEFFN\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\(", re.IGNORECASE)
+
+
+def _scan_declared_deffn_names(lines: list[str]) -> set[str]:
+    """Whole-file pre-scan for DEFFN-declared function names, same idea
+    and same reason as _scan_declared_bare_arrays above: a bare 'name('
+    call site can appear anywhere in the file, not just right after its
+    own 'DEFFN name(...)=...' declaration, and without knowing the name
+    is a DEFFN function (not an ordinary variable), tokenize_expr's
+    generic bare-identifier fallback resolves it as a plain scalar
+    instead -- confirmed real via regression_tests/edge_cases.lst's own
+    'DEFFN double(n%)=n%*2' / 'PRINT double(21)' (rendering back as
+    'double#(21)', a pre-existing accepted diff before this fix) and
+    COVFULL.LST's 'DEFFN dbl(n%)=n%*2' / 'a%=FN dbl(5)'. Only bare
+    (non-'$') DEFFN names are collected -- a string-returning DEFFN's
+    own call-site sigil handling is untested, left for a future case
+    rather than guessed.
+    """
+    declared: set[str] = set()
+    for line in lines:
+        m = _DEFFN_DECL_RE.match(line)
+        if m:
+            declared.add(m.group(1).lower())
+    return declared
+
+
 def tokenize_source(text: str) -> bytes:
     # A trailing 0x1A (Ctrl-Z) is the classic DOS/CP-M text-file EOF
     # marker, not GFA-BASIC syntax -- confirmed real: FCOMP2.LST and
@@ -3556,10 +3626,11 @@ def tokenize_source(text: str) -> bytes:
             # text.split("\n") doesn't share.
             lines.pop()
     declared_arrays = _scan_declared_bare_arrays(lines)
+    declared_deffn = _scan_declared_deffn_names(lines)
     encoded: list[bytes] = []
     for line in lines:
         try:
-            content = encode_line(line, pool, declared_arrays)
+            content = encode_line(line, pool, declared_arrays, declared_deffn)
         except GfaTokenizeError as exc:
             raise GfaTokenizeError(f"line {len(encoded) + 1}: {exc}") from exc
         encoded.append(content)
