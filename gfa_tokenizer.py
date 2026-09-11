@@ -2651,6 +2651,25 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                 out += tokenize_expr(prefix, 0, len(prefix), pool)
                 out.append(PFT_TEXT_TO_CODE[","])
                 out += tokenize_expr(tail, 0, len(tail), pool, array_open=True)
+            elif lcp in (516, 528):
+                # ON ERROR GOSUB / ON BREAK GOSUB: the target is a
+                # PROCEDURE reference (type 11), same as AFTER/EVERY's
+                # own GOSUB target above -- NOT a bare variable, which
+                # is what the generic tokenize_expr fallthrough produces
+                # (confirmed wrong 2026-09-10 via COVFULL.LST vs a real
+                # editor's own COVFULL9.GFA: 'ON ERROR GOSUB errhandler'
+                # round-trips back as 'errhandler#', the default-REAL
+                # sigil a bare-variable resolution gives it). Same class
+                # of bug as GOTO/RESTORE/RESUME's own bare_word_is_label
+                # fix, but type 11 (procedure) here, not type 10 (label).
+                target = rest.strip()
+                idx = pool.get_or_add(11, target)
+                if idx < 256:
+                    out.append(224 + 11)
+                    out.append(idx)
+                else:
+                    out.append(240 + 11)
+                    push16(out, idx)
             elif lcp == 1612:
                 # RECALL: a simple signed-integer argument (e.g. the
                 # '-1' in 'RECALL #1,recallarr$(),-1,reccount%') is a
