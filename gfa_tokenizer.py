@@ -2592,25 +2592,44 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                 # the plain form the generic tokenize_expr fallthrough
                 # produces for every other argument). Earlier arguments
                 # are untouched -- confirmed the SAME comparison shows
-                # BGET's own first argument (#1) stays plain.
+                # BGET's own first argument (#1) stays plain. Verified
+                # byte-for-byte (not just length) against COVFULL9.GFA:
+                # a full per-segment split is safe here specifically
+                # because none of these four ever has more than one bare
+                # numeric literal before the target, unlike ARECT/
+                # DMASOUND below (see their own comments for why they
+                # need the different, safer 2-piece form instead).
                 parts = _split_top_level_commas(rest)
                 for i, part in enumerate(parts):
                     if i > 0:
                         out.append(PFT_TEXT_TO_CODE[","])
                     out += tokenize_expr(part, 0, len(part), pool, array_open=(i == len(parts) - 1))
-            elif lcp == 1588:
-                # ARRAYFILL: the fill-value (last argument) is coerced
-                # to REAL, same mechanism as EVEN(/ODD( -- confirmed
-                # 2026-09-10 via COVFULL.LST vs a real editor's own
-                # COVFULL9.GFA ('ARRAYFILL afill%(),7''s 7 is 'dd e0' +
-                # double_to_gfa_float(7.0), not the plain integer this
-                # tokenizer produced). The array reference itself
-                # (first argument) is untouched.
+            elif lcp in (368, 1588):
+                # ARECT/ARRAYFILL: same "last argument gets special
+                # treatment" idea as the BSAVE family above (array_open
+                # for ARECT's trailing 0, seed_force_float_literal for
+                # ARRAYFILL's fill value -- see their own docstrings),
+                # but built as a 2-piece form instead of a full
+                # per-segment split: ARECT has SEVERAL bare-numeric
+                # arguments before its target, and a full split wrongly
+                # restarts "first token" state (see was_first_token's
+                # own docstring) for every one of them, not just the
+                # intended last one -- confirmed via a full byte (not
+                # just length) comparison against COVFULL9.GFA, which a
+                # first, naive full-split attempt at this fix passed by
+                # length-coincidence alone while being silently wrong.
+                # Combining everything but the target into ONE joined
+                # string preserves the true single "first token" for
+                # the statement's own real first argument.
                 parts = _split_top_level_commas(rest)
-                for i, part in enumerate(parts):
-                    if i > 0:
-                        out.append(PFT_TEXT_TO_CODE[","])
-                    out += tokenize_expr(part, 0, len(part), pool, seed_force_float_literal=(i == len(parts) - 1))
+                prefix = ",".join(parts[:-1])
+                if prefix:
+                    out += tokenize_expr(prefix, 0, len(prefix), pool)
+                    out.append(PFT_TEXT_TO_CODE[","])
+                if lcp == 368:
+                    out += tokenize_expr(parts[-1], 0, len(parts[-1]), pool, array_open=True)
+                else:
+                    out += tokenize_expr(parts[-1], 0, len(parts[-1]), pool, seed_force_float_literal=True)
             elif lcp == 1800:
                 # DMASOUND: its THIRD argument specifically (not the
                 # last) uses the odd-filler integer form -- confirmed
@@ -2619,12 +2638,19 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                 # 'c9 00 00 00 00 03', its second 3 stays plain 'c8 00
                 # 00 00 03'). Genuinely a different argument position
                 # than the BSAVE family's own "last argument" rule --
-                # not generalized, just this one confirmed shape.
+                # not generalized, just this one confirmed shape. Uses
+                # the same 2-piece form as ARECT/ARRAYFILL above (prefix
+                # combined normally, target+trailing combined into ONE
+                # string fed as a single tokenize_expr call) -- a full
+                # per-segment split wrongly gave the trailing 4th
+                # argument its own fresh "first token" treatment too,
+                # caught via a full byte (not just length) comparison.
                 parts = _split_top_level_commas(rest)
-                for i, part in enumerate(parts):
-                    if i > 0:
-                        out.append(PFT_TEXT_TO_CODE[","])
-                    out += tokenize_expr(part, 0, len(part), pool, array_open=(i == 2))
+                prefix = ",".join(parts[:2])
+                tail = ",".join(parts[2:])
+                out += tokenize_expr(prefix, 0, len(prefix), pool)
+                out.append(PFT_TEXT_TO_CODE[","])
+                out += tokenize_expr(tail, 0, len(tail), pool, array_open=True)
             elif lcp == 1612:
                 # RECALL: a simple signed-integer argument (e.g. the
                 # '-1' in 'RECALL #1,recallarr$(),-1,reccount%') is a
