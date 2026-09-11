@@ -1759,8 +1759,18 @@ def encode_line(
         # attached doubles it up on decode ("name$" -> "name$$").
         idx = pool.get_or_add(ftype, fname[:-1] if ftype == 15 else fname)
         push16(out, 228)
-        out.append(240 + ftype)
-        push16(out, idx)
+        # Byte form (idx < 256) vs word form, same choice every other
+        # identifier reference in this file makes -- this unconditional
+        # word form was a real bug (not just cosmetic): confirmed
+        # 2026-09-10 via COVFULL.LST vs a real editor's own COVFULL9.GFA
+        # ('DEFFN dbl(n%)=n%*2', pool index 1, used the byte form 'ee
+        # 01', not this project's own 'fe 00 01' word form).
+        if idx < 256:
+            out.append(224 + ftype)
+            out.append(idx)
+        else:
+            out.append(240 + ftype)
+            push16(out, idx)
         if params is not None:
             # lcp=228 isn't special-cased in the decoder at all (falls
             # straight into the generic stream after "DEFFN "), so unlike
@@ -2890,6 +2900,27 @@ def encode_line(
                         push32(out, int(part_stripped) & 0xFFFFFFFF)
                     else:
                         out += tokenize_expr(part, 0, len(part), pool)
+            elif lcp == 1432 and re.search(r"\bOFFSET\b", rest, re.IGNORECASE):
+                # CLIP's own last rectangle coordinate (the 4th, right
+                # before the 'OFFSET dx,dy' clause) uses the no-marker
+                # pft 223 packed-float form (seed_binary_arith_op),
+                # same code a value right after a binary/comparison
+                # operator gets -- confirmed 2026-09-10 via COVFULL.LST
+                # vs a real editor's own COVFULL9.GFA ('CLIP
+                # 0,0,100,100 OFFSET 5,5''s 2nd '100' is pft 223, not a
+                # plain integer). A PLAIN 'CLIP 0,0,100,100' with no
+                # OFFSET clause confirmed keeping its last coordinate
+                # plain -- this is specifically triggered by 'OFFSET's
+                # own presence, not every CLIP call.
+                m2 = re.search(r"\bOFFSET\b", rest, re.IGNORECASE)
+                coords, offset_clause = rest[:m2.start()], rest[m2.start():]
+                coord_parts = _split_top_level_commas(coords.strip())
+                prefix = ",".join(coord_parts[:-1])
+                if prefix:
+                    out += tokenize_expr(prefix, 0, len(prefix), pool)
+                    out.append(PFT_TEXT_TO_CODE[","])
+                out += tokenize_expr(coord_parts[-1], 0, len(coord_parts[-1]), pool, seed_binary_arith_op=True)
+                out += tokenize_expr(" " + offset_clause, 0, len(offset_clause) + 1, pool)
             elif lcp == 1292:
                 # EXEC: its first argument (the mode flag) uses the
                 # dedicated single-byte GFAPFT literal tokens 184 ('0')
