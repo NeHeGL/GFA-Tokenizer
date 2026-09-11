@@ -2514,6 +2514,17 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
     if kw_lcp is not None:
         lcp, rest_start = kw_lcp
         rest = body[rest_start:]
+        if lcp == 1424 and re.search(r"\bOFFSET\b", rest, re.IGNORECASE):
+            # CLIP has a distinct lcp (1432, not 1424) when it carries an
+            # optional 'OFFSET dx,dy' clause -- confirmed 2026-09-10 via
+            # COVFULL.LST vs a real editor's own COVFULL9.GFA ('CLIP
+            # 0,0,100,100 OFFSET 5,5' uses lcp 1432, plain 'CLIP
+            # 0,0,100,100' uses 1424). The OFFSET clause's own dx,dy
+            # values are plain, no special literal encoding needed --
+            # only the header lcp differs, so 'rest' (including the
+            # literal 'OFFSET' text) still tokenizes through the
+            # ordinary generic path below unchanged.
+            lcp = 1432
         if lcp == 1596 and not _split_top_level_commas(rest.strip())[1:]:
             # BITBLT has two distinct compiled forms depending on its
             # own argument count/shape: the documented 3-array form
@@ -2587,6 +2598,19 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
                     if i > 0:
                         out.append(PFT_TEXT_TO_CODE[","])
                     out += tokenize_expr(part, 0, len(part), pool, array_open=(i == len(parts) - 1))
+            elif lcp == 1588:
+                # ARRAYFILL: the fill-value (last argument) is coerced
+                # to REAL, same mechanism as EVEN(/ODD( -- confirmed
+                # 2026-09-10 via COVFULL.LST vs a real editor's own
+                # COVFULL9.GFA ('ARRAYFILL afill%(),7''s 7 is 'dd e0' +
+                # double_to_gfa_float(7.0), not the plain integer this
+                # tokenizer produced). The array reference itself
+                # (first argument) is untouched.
+                parts = _split_top_level_commas(rest)
+                for i, part in enumerate(parts):
+                    if i > 0:
+                        out.append(PFT_TEXT_TO_CODE[","])
+                    out += tokenize_expr(part, 0, len(part), pool, seed_force_float_literal=(i == len(parts) - 1))
             else:
                 out += tokenize_expr(rest, 0, len(rest), pool)
         _append_comment(out, comment)
