@@ -668,6 +668,53 @@ def tokenize_expr(text: str, pos: int, end: int, pool: IdentPool, array_open: bo
         was_force_float_literal, force_float_literal = force_float_literal, False
         was_binary_arith_op, just_saw_binary_arith_op = just_saw_binary_arith_op, False
         was_first_token, seen_any_token = not seen_any_token, True
+        if c == "@":
+            # '@name(args)' / '@name' direct PROCEDURE/FUNCTION call
+            # syntax used INSIDE an expression (e.g. 'a%=@myfunc(5)'),
+            # not just as a bare statement (which the separate
+            # statement-level '@name' handler already covers correctly)
+            # -- this position had no handling at all, so '@' was
+            # silently dropped and 'myfunc(5)' fell through to an
+            # ordinary bare-variable/array-like resolution (type 0),
+            # confirmed wrong 2026-09-10 via COVFULL.LST vs a real
+            # editor's own COVFULL9.GFA. Resolves through the same
+            # function-name group (type 14, or 15 if it ends in '$') as
+            # 'FUNCTION'/'> FUNCTION'/DEFFN's own name -- a call, not a
+            # declaration, so no distinct PROCEDURE-vs-FUNCTION lcp
+            # choice here, just the one shared reference form.
+            nm = re.match(r"[A-Za-z_][A-Za-z0-9_.$]*", text[pos + 1 : end])
+            if nm:
+                fname = nm.group(0)
+                newpos = pos + 1 + nm.end()
+                ftype = 15 if fname.endswith("$") else 14
+                idx = pool.get_or_add(ftype, fname[:-1] if ftype == 15 else fname)
+                out.append(159)  # '@' itself is its own GFAPFT token
+                if idx < 256:
+                    out.append(224 + ftype)
+                    out.append(idx)
+                else:
+                    out.append(240 + ftype)
+                    push16(out, idx)
+                pos = newpos
+                if pos < end and text[pos] == "(":
+                    depth = 1
+                    close = pos + 1
+                    while close < end and depth > 0:
+                        if text[close] == "(":
+                            depth += 1
+                        elif text[close] == ")":
+                            depth -= 1
+                        close += 1
+                    args = text[pos + 1 : close - 1]
+                    out.append(PFT_TEXT_TO_CODE["("])
+                    if args.strip():
+                        out += tokenize_expr(args, 0, len(args), pool)
+                    out.append(PFT_TEXT_TO_CODE[")"])
+                    pos = close
+                last_was_string = ftype == 15
+                last_was_string_literal = False
+                just_saw_value = True
+                continue
         if c == '"':
             close = text.find('"', pos + 1)
             if close == -1:
@@ -2078,6 +2125,39 @@ def encode_line(text: str, pool: IdentPool, declared_arrays: set[str] = frozense
         if args is not None and args.strip():
             out += tokenize_expr(args, 0, len(args), pool)
             out.append(PFT_TEXT_TO_CODE[")"])
+        _append_comment(out, comment)
+        return bytes(out)
+
+    # Bare "FUNCTION name(args)" -- no leading "> " -- same shape as bare
+    # PROCEDURE just above, but was missing its own dedicated handler
+    # entirely: 'FUNCTION' was left in _SIMPLE_KEYWORDS (lcp 40), so its
+    # name fell through the generic tokenize_expr path and resolved as
+    # an ordinary bare variable (type 0, REAL) -- confirmed wrong
+    # 2026-09-10 via COVFULL.LST vs a real editor's own COVFULL9.GFA
+    # ('FUNCTION myfunc(n%)' round-trips back as 'myfunc#'). Real
+    # GFA-BASIC resolves it through the function-name group instead
+    # (type 14, or 15 if it ends in '$' -- same group DEFFN and '>
+    # FUNCTION' already use), with an explicit '(' token (confirmed by
+    # the same comparison -- unlike bare PROCEDURE just above, which
+    # auto-synthesizes '(' on decode, this form does not) and the
+    # byte-sized var-index form when the pool index fits in a byte.
+    m = re.match(r"^FUNCTION\s+([A-Za-z_][A-Za-z0-9_.$]*)\s*(\((.*)\))?\s*$", body, re.IGNORECASE)
+    if m:
+        fname = m.group(1)
+        ftype = 15 if fname.endswith("$") else 14
+        idx = pool.get_or_add(ftype, fname[:-1] if ftype == 15 else fname)
+        push16(out, 40)
+        if idx < 256:
+            out.append(224 + ftype)
+            out.append(idx)
+        else:
+            out.append(240 + ftype)
+            push16(out, idx)
+        out.append(PFT_TEXT_TO_CODE["("])
+        args = m.group(3)
+        if args is not None and args.strip():
+            out += tokenize_expr(args, 0, len(args), pool)
+        out.append(PFT_TEXT_TO_CODE[")"])
         _append_comment(out, comment)
         return bytes(out)
 
