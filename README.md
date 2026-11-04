@@ -6,6 +6,18 @@
 
 Converts readable GFA-BASIC `.lst` source listings into the tokenized `.gfa` binary format the Atari ST GFA-BASIC editor loads and saves. Produced files can be loaded into the real GFA-BASIC editor and compiled with the real compiler.
 
+## Which GFA-BASIC versions this targets
+
+**This tool generates the GFA-BASIC 3.5+ token format only** (file-format version 4, the one the 3.6TT/3.6TE editor writes). It does not write the older 3.0x/3.07E token dialect.
+
+Checked against a real GFA-BASIC 3.07E setup (2026-11-04):
+
+- The 3.07E **editor** loads our output and re-saves it in its own version-3 format (it rebuilds its identifier table from the text, so a seeded `--var-order` table does not survive).
+- Changing the header's version byte to 3 does **not** make the file a 3.07E file: the 3.07E editor then crashes ("3 bombs - address error") and the 3.07E standalone **compiler** (`MENU.PRG` / `GFA_BCOM.PRG`) also bombs, because the token bytes are still the 3.5+ dialect (for example `0` is stored as a REAL constant, where the 3.07E editor stores a compact integer token).
+- So for a 3.07E compile, load the `.lst` in the 3.07E editor (or MERGE it) and save from there; do not feed this tool's `.gfa` straight to the 3.07E compiler.
+
+`--var-order FILE` pre-seeds the per-type identifier lists in a chosen order (the compiler hands out variable slots by that order). It only has an effect where the editor or compiler reads the stored table as is, which excludes the 3.07E editor.
+
 ## Requirements
 
 - Python 3.10+

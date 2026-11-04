@@ -12,6 +12,10 @@ documented in gfa_detokenizer.py:
   offset 12+:    38 x 4-byte big-endian "sep" pointers (sep[0] is always 0)
   pool_base = 12 + 38*4 = 164
 
+TARGET VERSION: this tool writes the GFA-BASIC 3.5+ token dialect only (file-format version 4, as saved by the 3.6TT/3.6TE
+editor).  It does NOT write the 3.0x/3.07E dialect: a 3.07E editor loads the output and re-saves it in its own format, but
+relabelling the header as version 3 crashes both the 3.07E editor and its standalone compiler (checked 2026-11-04).
+
 Identifier pool: 16 groups (by sigil), each a sequence of Pascal strings.
 Program listing: sequence of [2-byte size][token bytes] lines.
 
@@ -3913,7 +3917,7 @@ def _scan_declared_deffn_names(lines: list[str]) -> set[str]:
     return declared
 
 
-def tokenize_source(text: str) -> bytes:
+def tokenize_source(text: str, var_order: list[str] | None = None) -> bytes:
     # A trailing 0x1A (Ctrl-Z) is the classic DOS/CP-M text-file EOF
     # marker, not GFA-BASIC syntax -- confirmed real: FCOMP2.LST and
     # INSTALLR.LST (a companion project's own real-world archive) both
@@ -3926,6 +3930,14 @@ def tokenize_source(text: str) -> bytes:
     if cut != -1:
         text = text[:cut]
     pool = IdentPool()
+    # Optional variable-table pre-seed (--var-order): the compiler allocates a5 slots by type group and, inside a group, by the
+    # order of the editor's name list.  A program whose original author's table order differs from the text order (variables
+    # typed and later deleted leave holes) can only be rebuilt byte-for-byte if the lists are seeded the same way.
+    for entry in var_order or ():
+        ref = parse_var_ref(entry, 0)
+        if ref is None:
+            raise GfaTokenizeError(f"bad --var-order entry: {entry!r}")
+        pool.get_or_add(ref[0], ref[1])
     # NOT text.splitlines() -- it breaks on every Unicode line-boundary
     # code point (NEL U+0085, LS U+2028, PS U+2029, etc.), and this file
     # is read as latin1, so byte 0x85 (an accented character in the
@@ -4073,9 +4085,9 @@ def tokenize_source(text: str) -> bytes:
     return bytes(out)
 
 
-def tokenize_file(src: Path, dest: Path) -> int:
+def tokenize_file(src: Path, dest: Path, var_order: list[str] | None = None) -> int:
     text = src.read_text(encoding="latin1")
-    data = tokenize_source(text)
+    data = tokenize_source(text, var_order)
     dest.write_bytes(data)
     return len(text.replace("\r\n", "\n").split("\n"))
 
@@ -4090,6 +4102,9 @@ def run_cli(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("input", type=Path, nargs="?", help="Plain-text .lst source")
     parser.add_argument("-o", "--output", type=Path, help="Output file (default: <name>.gfa)")
+    parser.add_argument("--var-order", type=Path, metavar="FILE",
+                        help="text file, one variable per line with its sigil (v1%%, s$, a%%(, ...): pre-seeds the per-type "
+                             "name lists in that order so the compiler allocates slots in it")
     args = parser.parse_args(argv)
 
     if not args.input:
@@ -4098,7 +4113,11 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     output = args.output or args.input.with_suffix(".gfa")
     try:
-        line_count = tokenize_file(args.input, output)
+        var_order = None
+        if args.var_order:
+            var_order = [ln.strip() for ln in args.var_order.read_text(encoding="latin1").splitlines()
+                         if ln.strip() and not ln.startswith("#")]
+        line_count = tokenize_file(args.input, output, var_order)
     except GfaTokenizeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
